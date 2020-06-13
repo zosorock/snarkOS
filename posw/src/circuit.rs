@@ -102,6 +102,7 @@ mod test {
     };
     use snarkos_gadgets::{algorithms::crh::PedersenCompressedCRHGadget, curves::edwards_bls12::EdwardsBlsGadget};
     use snarkos_models::curves::to_field_vec::ToConstraintField;
+    use snarkos_profiler::{end_timer, start_timer};
     use snarkos_utilities::bytes::ToBytes;
 
     use blake2::{digest::Digest, Blake2s};
@@ -122,7 +123,7 @@ mod test {
     }
 
     // We use a small tree in this test
-    define_merkle_tree_parameters!(EdwardsMaskedMerkleParameters, PedersenCompressedCRH<Edwards, Size>, 5);
+    define_merkle_tree_parameters!(EdwardsMaskedMerkleParameters, PedersenCompressedCRH<Edwards, Size>, 3);
 
     type HashGadget = PedersenCompressedCRHGadget<Edwards, Fq, EdwardsBlsGadget>;
     type EdwardsMaskedMerkleTree = MerkleTree<EdwardsMaskedMerkleParameters>;
@@ -134,7 +135,7 @@ mod test {
         let parameters = EdwardsMaskedMerkleParameters::setup(&mut rng);
         let params = generate_random_parameters::<Bls12_377, _, _>(
             POSWCircuit::<_, EdwardsMaskedMerkleParameters, HashGadget, TestPOSWCircuitParameters> {
-                leaves: vec![None; 7],
+                leaves: vec![None; 4],
                 merkle_parameters: parameters.clone(),
                 mask: None,
                 root: None,
@@ -147,7 +148,7 @@ mod test {
         .unwrap();
 
         let nonce = [1; 32];
-        let leaves = vec![vec![3u8; 32]; 7];
+        let leaves = vec![vec![3u8; 32]; 4];
         let tree = EdwardsMaskedMerkleTree::new(parameters.clone(), &leaves).unwrap();
         let root = tree.root();
         let mut root_bytes = [0; 32];
@@ -159,6 +160,7 @@ mod test {
         let mask = h.result().to_vec();
 
         let snark_leaves = tree.leaves_hashed().into_iter().map(Some).collect();
+        let proof_timer = start_timer!(|| "POSW proof");
         let proof = create_random_proof(
             POSWCircuit::<_, EdwardsMaskedMerkleParameters, HashGadget, TestPOSWCircuitParameters> {
                 leaves: snark_leaves,
@@ -173,6 +175,7 @@ mod test {
             &mut rng,
         )
         .unwrap();
+        end_timer!(proof_timer);
 
         let inputs = [ToConstraintField::<Fr>::to_field_elements(&mask[..]).unwrap(), vec![
             root,
