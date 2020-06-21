@@ -14,7 +14,7 @@ use snarkos_models::{
     objects::{account::AccountScheme, Transaction},
     parameters::Parameters,
 };
-use snarkos_objects::{Account, AccountPublicKey};
+use snarkos_objects::{Account, AccountAddress};
 use snarkos_parameters::LedgerMerkleTreeParameters;
 use snarkos_storage::{key_value::NUM_COLS, storage::Storage, Ledger};
 use snarkos_utilities::{
@@ -60,7 +60,7 @@ fn empty_ledger<T: Transaction, P: MerkleParameters>(
 pub fn generate(recipient: &String, value: u64, network_id: u8, file_name: &String) -> Result<Vec<u8>, DPCError> {
     let rng = &mut thread_rng();
 
-    let recipient: AccountPublicKey<Components> = FromBytes::read(&hex::decode(recipient).unwrap()[..])?;
+    let recipient: AccountAddress<Components> = FromBytes::read(&hex::decode(recipient).unwrap()[..])?;
 
     let crh_parameters =
         <MerkleTreeCRH as CRH>::Parameters::read(&LedgerMerkleTreeParameters::load_bytes().unwrap()[..])
@@ -100,7 +100,7 @@ pub fn generate(recipient: &String, value: u64, network_id: u8, file_name: &Stri
         let old_record = DPC::generate_record(
             &parameters.circuit_parameters,
             &old_sn_nonce,
-            &dummy_account.public_key,
+            &dummy_account.address,
             true, // The input record is dummy
             0,
             &RecordPayload::default(),
@@ -114,7 +114,7 @@ pub fn generate(recipient: &String, value: u64, network_id: u8, file_name: &Stri
 
     // Construct new records
 
-    let new_account_public_keys = vec![recipient.clone(); Components::NUM_OUTPUT_RECORDS];
+    let new_account_addresses = vec![recipient.clone(); Components::NUM_OUTPUT_RECORDS];
     let new_payloads = vec![RecordPayload::default(); Components::NUM_OUTPUT_RECORDS];
     let new_birth_predicates = vec![predicate.clone(); Components::NUM_OUTPUT_RECORDS];
     let new_death_predicates = vec![predicate.clone(); Components::NUM_OUTPUT_RECORDS];
@@ -142,7 +142,7 @@ pub fn generate(recipient: &String, value: u64, network_id: u8, file_name: &Stri
         &parameters,
         old_records,
         old_account_private_keys,
-        new_account_public_keys,
+        new_account_addresses,
         new_birth_predicates,
         new_death_predicates,
         new_dummy_flags,

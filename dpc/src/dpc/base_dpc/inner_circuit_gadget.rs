@@ -188,7 +188,7 @@ where
     let mut old_serial_numbers_gadgets = Vec::with_capacity(old_records.len());
     let mut old_serial_numbers_bytes_gadgets = Vec::with_capacity(old_records.len() * 32); // Serial numbers are 32 bytes
     let mut old_record_commitments_gadgets = Vec::with_capacity(old_records.len());
-    let mut old_account_public_keys_gadgets = Vec::with_capacity(old_records.len());
+    let mut old_account_addresses_gadgets = Vec::with_capacity(old_records.len());
     let mut old_dummy_flags_gadgets = Vec::with_capacity(old_records.len());
     let mut old_value_gadgets = Vec::with_capacity(old_records.len());
     let mut old_payloads_gadgets = Vec::with_capacity(old_records.len());
@@ -196,7 +196,7 @@ where
     let mut old_death_predicate_hashes_gadgets = Vec::with_capacity(old_records.len());
 
     let mut new_record_commitments_gadgets = Vec::with_capacity(new_records.len());
-    let mut new_account_public_keys_gadgets = Vec::with_capacity(new_records.len());
+    let mut new_account_addresses_gadgets = Vec::with_capacity(new_records.len());
     let mut new_dummy_flags_gadgets = Vec::with_capacity(new_records.len());
     let mut new_value_gadgets = Vec::with_capacity(new_records.len());
     let mut new_payloads_gadgets = Vec::with_capacity(new_records.len());
@@ -302,7 +302,7 @@ where
 
         // Declare record contents
         let (
-            given_account_public_key,
+            given_account_address,
             given_commitment,
             given_is_dummy,
             given_value,
@@ -314,16 +314,16 @@ where
         ) = {
             let declare_cs = &mut cs.ns(|| "Declare input record");
 
-            // No need to check that commitments, public keys and hashes are in
+            // No need to check that commitments, addresses, and hashes are in
             // prime order subgroup because the commitment and CRH parameters
             // are trusted, and so when we recompute these, the newly computed
             // values will always be in correct subgroup. If the input cm, pk
             // or hash is incorrect, then it will not match the computed equivalent.
-            let given_account_public_key = AccountCommitmentGadget::OutputGadget::alloc(
-                &mut declare_cs.ns(|| "given_account_public_key"),
-                || Ok(&record.account_public_key().commitment),
-            )?;
-            old_account_public_keys_gadgets.push(given_account_public_key.clone());
+            let given_account_address =
+                AccountCommitmentGadget::OutputGadget::alloc(&mut declare_cs.ns(|| "given_account_address"), || {
+                    Ok(&record.account_address().commitment)
+                })?;
+            old_account_addresses_gadgets.push(given_account_address.clone());
 
             let given_commitment =
                 RecordCommitmentGadget::OutputGadget::alloc(&mut declare_cs.ns(|| "given_commitment"), || {
@@ -362,7 +362,7 @@ where
                     Ok(record.serial_number_nonce())
                 })?;
             (
-                given_account_public_key,
+                given_account_address,
                 given_commitment,
                 given_is_dummy,
                 given_value,
@@ -398,7 +398,7 @@ where
         // ********************************************************************
 
         // ********************************************************************
-        // Check that the account public key and private key form a valid key
+        // Check that the account address and private key form a valid key
         // pair.
         // ********************************************************************
 
@@ -422,20 +422,20 @@ where
                 Ok(&account_private_key.r_pk)
             })?;
 
-            let mut account_public_key_input = pk_sig_bytes.clone();
-            account_public_key_input.extend_from_slice(&sk_prf);
-            account_public_key_input.extend_from_slice(&metadata);
+            let mut account_address_input = pk_sig_bytes.clone();
+            account_address_input.extend_from_slice(&sk_prf);
+            account_address_input.extend_from_slice(&metadata);
 
-            let candidate_account_public_key = AccountCommitmentGadget::check_commitment_gadget(
-                &mut account_cs.ns(|| "Compute account public key"),
+            let candidate_account_address = AccountCommitmentGadget::check_commitment_gadget(
+                &mut account_cs.ns(|| "Compute account address"),
                 &account_commitment_parameters,
-                &account_public_key_input,
+                &account_address_input,
                 &r_pk,
             )?;
 
-            candidate_account_public_key.enforce_equal(
-                &mut account_cs.ns(|| "Check that declared and computed public keys are equal"),
-                &given_account_public_key,
+            candidate_account_address.enforce_equal(
+                &mut account_cs.ns(|| "Check that declared and computed addresses are equal"),
+                &given_account_address,
             )?;
             (sk_prf, pk_sig)
         };
@@ -526,12 +526,12 @@ where
         {
             let commitment_cs = &mut cs.ns(|| "Check that record is well-formed");
 
-            let account_public_key_bytes =
-                given_account_public_key.to_bytes(&mut commitment_cs.ns(|| "Convert account_public_key to bytes"))?;
+            let account_address_bytes =
+                given_account_address.to_bytes(&mut commitment_cs.ns(|| "Convert account_address to bytes"))?;
             let is_dummy_bytes = given_is_dummy.to_bytes(&mut commitment_cs.ns(|| "Convert is_dummy to bytes"))?;
 
             let mut commitment_input = Vec::new();
-            commitment_input.extend_from_slice(&account_public_key_bytes);
+            commitment_input.extend_from_slice(&account_address_bytes);
             commitment_input.extend_from_slice(&is_dummy_bytes);
             commitment_input.extend_from_slice(&given_value);
             commitment_input.extend_from_slice(&given_payload);
@@ -562,7 +562,7 @@ where
         let cs = &mut cs.ns(|| format!("Process output record {}", j));
 
         let (
-            given_account_public_key,
+            given_account_address,
             given_record_commitment,
             given_commitment,
             given_is_dummy,
@@ -575,11 +575,11 @@ where
         ) = {
             let declare_cs = &mut cs.ns(|| "Declare output record");
 
-            let given_account_public_key = AccountCommitmentGadget::OutputGadget::alloc(
-                &mut declare_cs.ns(|| "given_account_public_key"),
-                || Ok(&record.account_public_key().commitment),
-            )?;
-            new_account_public_keys_gadgets.push(given_account_public_key.clone());
+            let given_account_address =
+                AccountCommitmentGadget::OutputGadget::alloc(&mut declare_cs.ns(|| "given_account_address"), || {
+                    Ok(&record.account_address().commitment)
+                })?;
+            new_account_addresses_gadgets.push(given_account_address.clone());
 
             let given_record_commitment =
                 RecordCommitmentGadget::OutputGadget::alloc(&mut declare_cs.ns(|| "given_record_commitment"), || {
@@ -624,7 +624,7 @@ where
                 })?;
 
             (
-                given_account_public_key,
+                given_account_address,
                 given_record_commitment,
                 given_commitment,
                 given_is_dummy,
@@ -707,13 +707,13 @@ where
         {
             let commitment_cs = &mut cs.ns(|| "Check that record is well-formed");
 
-            let account_public_key_bytes =
-                given_account_public_key.to_bytes(&mut commitment_cs.ns(|| "Convert account_public_key to bytes"))?;
+            let account_address_bytes =
+                given_account_address.to_bytes(&mut commitment_cs.ns(|| "Convert account_address to bytes"))?;
             let is_dummy_bytes = given_is_dummy.to_bytes(&mut commitment_cs.ns(|| "Convert is_dummy to bytes"))?;
             let sn_nonce_bytes = serial_number_nonce.to_bytes(&mut commitment_cs.ns(|| "Convert sn nonce to bytes"))?;
 
             let mut commitment_input = Vec::new();
-            commitment_input.extend_from_slice(&account_public_key_bytes);
+            commitment_input.extend_from_slice(&account_address_bytes);
             commitment_input.extend_from_slice(&is_dummy_bytes);
             commitment_input.extend_from_slice(&given_value);
             commitment_input.extend_from_slice(&given_payload);
@@ -796,9 +796,8 @@ where
             local_data_bytes.extend_from_slice(
                 &old_record_commitments_gadgets[i].to_bytes(&mut cs.ns(|| "old_record_commitment"))?,
             );
-            local_data_bytes.extend_from_slice(
-                &old_account_public_keys_gadgets[i].to_bytes(&mut cs.ns(|| "old_account_public_key"))?,
-            );
+            local_data_bytes
+                .extend_from_slice(&old_account_addresses_gadgets[i].to_bytes(&mut cs.ns(|| "old_account_address"))?);
             local_data_bytes.extend_from_slice(&old_dummy_flags_gadgets[i].to_bytes(&mut cs.ns(|| "is_dummy"))?);
             local_data_bytes.extend_from_slice(&old_value_gadgets[i]);
             local_data_bytes.extend_from_slice(&old_payloads_gadgets[i]);
@@ -813,7 +812,7 @@ where
             local_data_bytes
                 .extend_from_slice(&new_record_commitments_gadgets[j].to_bytes(&mut cs.ns(|| "record_commitment"))?);
             local_data_bytes
-                .extend_from_slice(&new_account_public_keys_gadgets[j].to_bytes(&mut cs.ns(|| "account_public_key"))?);
+                .extend_from_slice(&new_account_addresses_gadgets[j].to_bytes(&mut cs.ns(|| "account_address"))?);
             local_data_bytes.extend_from_slice(&new_dummy_flags_gadgets[j].to_bytes(&mut cs.ns(|| "is_dummy"))?);
             local_data_bytes.extend_from_slice(&new_value_gadgets[j]);
             local_data_bytes.extend_from_slice(&new_payloads_gadgets[j]);

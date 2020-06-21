@@ -1,4 +1,4 @@
-use crate::account::{Account, AccountPrivateKey, AccountPublicKey};
+use crate::account::{Account, AccountAddress, AccountPrivateKey};
 use snarkos_dpc::base_dpc::{instantiated::Components, parameters::CircuitParameters};
 use snarkos_models::objects::account::AccountScheme;
 
@@ -32,10 +32,10 @@ pub fn test_private_key_from_str() {
 }
 
 #[test]
-pub fn test_public_key_from_str() {
-    let public_key_string = "aleo1qnr4dkkvkgfqph0vzc3y6z2eu975wnpz2925ntjccd5cfqxtyu8sta57j8";
+pub fn test_address_from_str() {
+    let address_string = "aleo1qnr4dkkvkgfqph0vzc3y6z2eu975wnpz2925ntjccd5cfqxtyu8sta57j8";
 
-    let public_key = AccountPublicKey::<Components>::from_str(public_key_string);
-    assert!(public_key.is_ok());
-    assert_eq!(public_key_string, public_key.unwrap().to_string());
+    let address = AccountAddress::<Components>::from_str(address_string);
+    assert!(address.is_ok());
+    assert_eq!(address_string, address.unwrap().to_string());
 }

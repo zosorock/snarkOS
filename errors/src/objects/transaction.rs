@@ -5,7 +5,7 @@ pub enum TransactionError {
     #[error("UTXO has already been spent {:?} index: {:?}", _0, _1)]
     AlreadySpent(Vec<u8>, u32),
 
-    #[error("there is a double spend occuring with this transaction {}", _0)]
+    #[error("there is a double spend in this transaction {}", _0)]
     DoubleSpend(String),
 
     #[error("{}: {}", _0, _1)]
@@ -17,12 +17,6 @@ pub enum TransactionError {
     #[error("invalid coinbase transaction")]
     InvalidCoinbaseTransaction,
 
-    #[error("invalid pub key hash script_pub_key: {} script_sig: {}", _0, _1)]
-    InvalidPubKeyHash(String, String),
-
-    #[error("invalid script pub key for format: {}", _0)]
-    InvalidScriptPubKey(String),
-
     #[error("invalid transaction id {:?}", _0)]
     InvalidTransactionId(usize),
 
@@ -31,9 +25,6 @@ pub enum TransactionError {
 
     #[error("{}", _0)]
     Message(String),
-
-    #[error("missing outpoint script public key")]
-    MissingOutpointScriptPublicKey,
 
     #[error("the block has multiple coinbase transactions: {:?}", _0)]
     MultipleCoinbaseTransactions(u32),

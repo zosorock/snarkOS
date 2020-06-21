@@ -88,8 +88,8 @@ pub struct RPCRecordPayload {
 /// Returned value for the `decoderawrecord` rpc call
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecordInfo {
-    /// Account public key of the record owner
-    pub account_public_key: String,
+    /// Account address of the record owner
+    pub account_address: String,
 
     /// Record is dummy flag
     pub is_dummy: bool,
