@@ -84,13 +84,6 @@ impl PedersenSize for RecordWindow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AccountWindow;
-impl PedersenSize for AccountWindow {
-    const NUM_WINDOWS: usize = 8;
-    const WINDOW_SIZE: usize = 192;
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ValueWindow;
 
 impl PedersenSize for ValueWindow {
@@ -147,7 +140,7 @@ pub type OuterPairing = BW6_761;
 pub type InnerField = Bls12_377Fr;
 pub type OuterField = Bls12_377Fq;
 
-pub type AccountCommitment = PedersenCompressedCommitment<EdwardsBls, AccountWindow>;
+pub type AccountCommitment = Blake2sCommitment;
 pub type RecordCommitment = PedersenCompressedCommitment<EdwardsBls, RecordWindow>;
 pub type PredicateVerificationKeyCommitment = Blake2sCommitment;
 pub type LocalDataCommitment = PedersenCompressedCommitment<EdwardsBls, LocalDataWindow>;
@@ -172,7 +165,7 @@ pub type LocalData = DPCLocalData<Components>;
 
 // Gadgets
 
-pub type AccountCommitmentGadget = PedersenCompressedCommitmentGadget<EdwardsBls, InnerField, EdwardsBlsGadget>;
+pub type AccountCommitmentGadget = Blake2sCommitmentGadget;
 pub type RecordCommitmentGadget = PedersenCompressedCommitmentGadget<EdwardsBls, InnerField, EdwardsBlsGadget>;
 pub type PredicateVerificationKeyCommitmentGadget = Blake2sCommitmentGadget;
 pub type LocalDataCommitmentGadget = PedersenCompressedCommitmentGadget<EdwardsBls, InnerField, EdwardsBlsGadget>;

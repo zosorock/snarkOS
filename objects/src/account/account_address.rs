@@ -100,6 +100,6 @@ impl<C: DPCComponents> fmt::Display for AccountAddress<C> {
 
 impl<C: DPCComponents> fmt::Debug for AccountAddress<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "AccountPublicKey {{ commitment: {:?} }}", self.commitment)
+        write!(f, "AccountAddress {{ commitment: {:?} }}", self.commitment)
     }
 }
