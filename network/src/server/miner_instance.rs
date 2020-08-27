@@ -76,7 +76,7 @@ impl MinerInstance {
                         info!("Block found!    {:?}", hex::encode(block.header.get_hash().0));
 
                         if let Err(err) = propagate_block(context.clone(), block_serialized, local_address).await {
-                            info!("Error propagating block to peers: {:?}", err);
+                            debug!("Error propagating block to peers: {:?}", err);
                         }
                     }
                     Err(_) => continue,
