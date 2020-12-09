@@ -293,6 +293,171 @@ fn blake2s_compression<F: PrimeField, CS: ConstraintSystem<F>>(
     Ok(())
 }
 
+// TODO: FOR TESTING ONLY. NOT SECURE.
+// 3.2.  Compression Function F
+// Compression function F takes as an argument the state vector "h",
+// message block vector "m" (last block is padded with zeros to full
+// block size, if required), 2w-bit_gadget offset counter "t", and final block
+// indicator flag "f".  Local vector v[0..15] is used in processing.  F
+// returns a new state vector.  The number of rounds, "r", is 12 for
+// BLAKE2b and 10 for BLAKE2s.  Rounds are numbered from 0 to r - 1.
+// FUNCTION F( h[0..7], m[0..15], t, f )
+// |
+// |      // Initialize local work vector v[0..15]
+// |      v[0..7] := h[0..7]              // First half from state.
+// |      v[8..15] := IV[0..7]            // Second half from IV.
+// |
+// |      v[12] := v[12] ^ (t mod 2**w)   // Low word of the offset.
+// |      v[13] := v[13] ^ (t >> w)       // High word.
+// |
+// |      IF f = TRUE THEN                // last block flag?
+// |      |   v[14] := v[14] ^ 0xFF..FF   // Invert all bits.
+// |      END IF.
+// |
+// |      // Cryptographic mixing
+// |      FOR i = 0 TO r - 1 DO           // TODO: 1 round only.
+// |      |
+// |      |   // Message word selection permutation for this round.
+// |      |   s[0..15] := SIGMA[i mod 10][0..15]
+// |      |
+// |      |   v := G( v, 0, 4,  8, 12, m[s[ 0]], m[s[ 1]] )
+// |      |   v := G( v, 1, 5,  9, 13, m[s[ 2]], m[s[ 3]] )
+// |      |   v := G( v, 2, 6, 10, 14, m[s[ 4]], m[s[ 5]] )
+// |      |   v := G( v, 3, 7, 11, 15, m[s[ 6]], m[s[ 7]] )
+// |      |
+// |      |   v := G( v, 0, 5, 10, 15, m[s[ 8]], m[s[ 9]] )
+// |      |   v := G( v, 1, 6, 11, 12, m[s[10]], m[s[11]] )
+// |      |   v := G( v, 2, 7,  8, 13, m[s[12]], m[s[13]] )
+// |      |   v := G( v, 3, 4,  9, 14, m[s[14]], m[s[15]] )
+// |      |
+// |      END FOR
+// |
+// |      FOR i = 0 TO 7 DO               // XOR the two halves.
+// |      |   h[i] := h[i] ^ v[i] ^ v[i + 8]
+// |      END FOR.
+// |
+// |      RETURN h[0..7]                  // New state.
+// |
+// END FUNCTION.
+//
+
+// TODO: FOR TESTING ONLY. NOT SECURE.
+#[allow(clippy::many_single_char_names)]
+fn blake2_one_round_compression<F: PrimeField, CS: ConstraintSystem<F>>(
+    mut cs: CS,
+    h: &mut [UInt32],
+    m: &[UInt32],
+    t: u64,
+    f: bool,
+) -> Result<(), SynthesisError> {
+    assert_eq!(h.len(), 8);
+    assert_eq!(m.len(), 16);
+
+    // static const uint32_t blake2s_iv[8] =
+    // {
+    // 0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+    // 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
+    // };
+    //
+
+    let mut v = Vec::with_capacity(16);
+    v.extend_from_slice(h);
+    v.push(UInt32::constant(0x6A09E667));
+    v.push(UInt32::constant(0xBB67AE85));
+    v.push(UInt32::constant(0x3C6EF372));
+    v.push(UInt32::constant(0xA54FF53A));
+    v.push(UInt32::constant(0x510E527F));
+    v.push(UInt32::constant(0x9B05688C));
+    v.push(UInt32::constant(0x1F83D9AB));
+    v.push(UInt32::constant(0x5BE0CD19));
+
+    assert_eq!(v.len(), 16);
+
+    v[12] = v[12].xor(cs.ns(|| "first xor"), &UInt32::constant(t as u32))?;
+    v[13] = v[13].xor(cs.ns(|| "second xor"), &UInt32::constant((t >> 32) as u32))?;
+
+    if f {
+        v[14] = v[14].xor(cs.ns(|| "third xor"), &UInt32::constant(u32::max_value()))?;
+    }
+
+    let mut cs = cs.ns(|| "round 1".to_string());
+
+    let s = SIGMA[1];
+
+    mixing_g(cs.ns(|| "mixing invocation 1"), &mut v, 0, 4, 8, 12, &m[s[0]], &m[s[1]])?;
+    mixing_g(cs.ns(|| "mixing invocation 2"), &mut v, 1, 5, 9, 13, &m[s[2]], &m[s[3]])?;
+    mixing_g(
+        cs.ns(|| "mixing invocation 3"),
+        &mut v,
+        2,
+        6,
+        10,
+        14,
+        &m[s[4]],
+        &m[s[5]],
+    )?;
+    mixing_g(
+        cs.ns(|| "mixing invocation 4"),
+        &mut v,
+        3,
+        7,
+        11,
+        15,
+        &m[s[6]],
+        &m[s[7]],
+    )?;
+
+    mixing_g(
+        cs.ns(|| "mixing invocation 5"),
+        &mut v,
+        0,
+        5,
+        10,
+        15,
+        &m[s[8]],
+        &m[s[9]],
+    )?;
+    mixing_g(
+        cs.ns(|| "mixing invocation 6"),
+        &mut v,
+        1,
+        6,
+        11,
+        12,
+        &m[s[10]],
+        &m[s[11]],
+    )?;
+    mixing_g(
+        cs.ns(|| "mixing invocation 7"),
+        &mut v,
+        2,
+        7,
+        8,
+        13,
+        &m[s[12]],
+        &m[s[13]],
+    )?;
+    mixing_g(
+        cs.ns(|| "mixing invocation 8"),
+        &mut v,
+        3,
+        4,
+        9,
+        14,
+        &m[s[14]],
+        &m[s[15]],
+    )?;
+
+    for i in 0..8 {
+        let mut cs = cs.ns(|| format!("h[{i}] ^ v[{i}] ^ v[{i} + 8]", i = i));
+
+        h[i] = h[i].xor(cs.ns(|| "first xor"), &v[i])?;
+        h[i] = h[i].xor(cs.ns(|| "second xor"), &v[i + 8])?;
+    }
+
+    Ok(())
+}
+
 // FUNCTION BLAKE2( d[0..dd-1], ll, kk, nn )
 // |
 // |     h[0..7] := IV[0..7]          // Initialization Vector.
@@ -371,7 +536,89 @@ pub fn blake2s_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
     Ok(h)
 }
 
+// TODO: FOR TESTING ONLY. NOT SECURE.
+// FUNCTION BLAKE2( d[0..dd-1], ll, kk, nn )
+// |
+// |     h[0..7] := IV[0..7]          // Initialization Vector.
+// |
+// |     // Parameter block p[0]
+// |     h[0] := h[0] ^ 0x01010000 ^ (kk << 8) ^ nn
+// |
+// |     // Process padded key and data blocks
+// |     IF dd > 1 THEN
+// |     |       FOR i = 0 TO dd - 2 DO
+// |     |       |       h := F( h, d[i], (i + 1) * bb, FALSE )
+// |     |       END FOR.
+// |     END IF.
+// |
+// |     // Final block.
+// |     IF kk = 0 THEN
+// |     |       h := F( h, d[dd - 1], ll, TRUE )
+// |     ELSE
+// |     |       h := F( h, d[dd - 1], ll + bb, TRUE )
+// |     END IF.
+// |
+// |     RETURN first "nn" bytes from little-endian word array h[].
+// |
+// END FUNCTION.
+//
+
+// TODO: FOR TESTING ONLY. NOT SECURE.
+pub fn blake2_one_round_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
+    mut cs: CS,
+    input: &[Boolean],
+) -> Result<Vec<UInt32>, SynthesisError> {
+    assert!(input.len() % 8 == 0);
+
+    let mut h = Vec::with_capacity(8);
+    h.push(UInt32::constant(0x6A09E667 ^ 0x01010000 ^ 32));
+    h.push(UInt32::constant(0xBB67AE85));
+    h.push(UInt32::constant(0x3C6EF372));
+    h.push(UInt32::constant(0xA54FF53A));
+    h.push(UInt32::constant(0x510E527F));
+    h.push(UInt32::constant(0x9B05688C));
+    h.push(UInt32::constant(0x1F83D9AB));
+    h.push(UInt32::constant(0x5BE0CD19));
+
+    let mut blocks: Vec<Vec<UInt32>> = Vec::with_capacity(input.len() / 512);
+
+    for block in input.chunks(512) {
+        let mut this_block = Vec::with_capacity(16);
+        for word in block.chunks(32) {
+            let mut tmp = word.to_vec();
+            while tmp.len() < 32 {
+                tmp.push(Boolean::constant(false));
+            }
+            this_block.push(UInt32::from_bits_le(&tmp));
+        }
+        while this_block.len() < 16 {
+            this_block.push(UInt32::constant(0));
+        }
+        blocks.push(this_block);
+    }
+
+    if blocks.is_empty() {
+        blocks.push((0..16).map(|_| UInt32::constant(0)).collect());
+    }
+
+    for (i, block) in blocks[0..blocks.len() - 1].iter().enumerate() {
+        let cs = cs.ns(|| format!("block {}", i));
+
+        blake2_one_round_compression(cs, &mut h, block, ((i as u64) + 1) * 64, false)?;
+    }
+
+    {
+        let cs = cs.ns(|| "final block");
+
+        blake2_one_round_compression(cs, &mut h, &blocks[blocks.len() - 1], (input.len() / 8) as u64, true)?;
+    }
+
+    Ok(h)
+}
+
 pub struct Blake2sGadget;
+
+pub struct Blake2OneRoundGadget;
 
 #[derive(Clone, Debug)]
 pub struct Blake2sOutputGadget(pub Vec<UInt8>);
@@ -457,6 +704,36 @@ impl<F: PrimeField> AllocGadget<[u8; 32], F> for Blake2sOutputGadget {
 }
 
 impl<F: PrimeField> PRFGadget<Blake2s, F> for Blake2sGadget {
+    type OutputGadget = Blake2sOutputGadget;
+
+    fn new_seed<CS: ConstraintSystem<F>>(mut cs: CS, seed: &[u8; 32]) -> Vec<UInt8> {
+        UInt8::alloc_vec(&mut cs.ns(|| "alloc_seed"), seed).unwrap()
+    }
+
+    fn check_evaluation_gadget<CS: ConstraintSystem<F>>(
+        mut cs: CS,
+        seed: &[UInt8],
+        input: &[UInt8],
+    ) -> Result<Self::OutputGadget, SynthesisError> {
+        assert_eq!(seed.len(), 32);
+        // assert_eq!(input.len(), 32);
+        let mut gadget_input = vec![];
+        for byte in seed.iter().chain(input) {
+            gadget_input.extend_from_slice(&byte.to_bits_le());
+        }
+        let mut result = vec![];
+        for (i, int) in blake2s_gadget(cs.ns(|| "blake2s_prf"), &gadget_input)?
+            .into_iter()
+            .enumerate()
+        {
+            let chunk = int.to_bytes(&mut cs.ns(|| format!("to_bytes_{}", i)))?;
+            result.extend_from_slice(&chunk);
+        }
+        Ok(Blake2sOutputGadget(result))
+    }
+}
+
+impl<F: PrimeField> PRFGadget<Blake2s, F> for Blake2OneRoundGadget {
     type OutputGadget = Blake2sOutputGadget;
 
     fn new_seed<CS: ConstraintSystem<F>>(mut cs: CS, seed: &[u8; 32]) -> Vec<UInt8> {
