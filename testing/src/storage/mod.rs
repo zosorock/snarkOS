@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
 use crate::sync::TestTx;
 pub use snarkos_storage::{Ledger, LedgerStorage};
 use snarkvm_algorithms::traits::merkle_tree::LoadableMerkleParameters;
@@ -31,7 +33,7 @@ pub fn random_storage_path() -> String {
 
 // Initialize a test blockchain given genesis attributes
 pub fn initialize_test_blockchain<T: Transaction, P: LoadableMerkleParameters, S: Storage>(
-    parameters: P,
+    parameters: Arc<P>,
     genesis_block: Block<T>,
 ) -> Ledger<T, P, S> {
     let mut path = std::env::temp_dir();

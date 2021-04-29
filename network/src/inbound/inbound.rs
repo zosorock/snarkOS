@@ -16,19 +16,10 @@
 
 use crate::{errors::NetworkError, message::*, stats, Cache, ConnReader, ConnWriter, Node, Receiver, Sender, State};
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use parking_lot::Mutex;
 use snarkvm_objects::Storage;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::mpsc::{channel, error::TrySendError},
-    task,
-};
-
-/// The map of remote addresses to their active writers.
-pub type Channels = HashMap<SocketAddr, Arc<ConnWriter>>;
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{Mutex, mpsc::{channel, error::TrySendError}}, task};
 
 /// A stateless component for handling inbound network traffic.
 #[derive(Debug)]
@@ -53,15 +44,86 @@ impl Default for Inbound {
 
 impl Inbound {
     #[inline]
-    pub(crate) fn take_receiver(&self) -> Receiver {
+    pub(crate) async fn take_receiver(&self) -> Receiver {
         self.receiver
             .lock()
+            .await
             .take()
             .expect("The Inbound Receiver had already been taken!")
     }
 }
 
 impl<S: Storage + Send + Sync + 'static> Node<S> {
+
+    async fn handle_connection(&self, stream: TcpStream, remote_address: SocketAddr, listener_address: SocketAddr) {
+        info!("Got a connection request from {}", remote_address);
+
+        if !self.can_connect() {
+            metrics::increment_counter!(stats::CONNECTIONS_ALL_REJECTED);
+            return;
+        }
+        // Wait a maximum timeout limit for a connection request.
+        let handshake_result = tokio::time::timeout(
+            Duration::from_secs(crate::HANDSHAKE_PEER_TIMEOUT_SECS as u64),
+            self.connection_request(listener_address, remote_address, stream),
+        )
+        .await;
+
+        match handshake_result {
+            Ok(Ok((mut writer, mut reader, remote_listener))) => {
+                // Update the remote address to be the peer's listening address.
+                let remote_address = writer.addr;
+
+                // Create a channel dedicated to sending messages to the connection.
+                let (sender, receiver) = channel(1024);
+
+                // Listen for inbound messages.
+                let node_clone = self.clone();
+                let peer_reading_task = tokio::spawn(async move {
+                    node_clone.listen_for_inbound_messages(&mut reader).await;
+                });
+
+                // Listen for outbound messages.
+                let node_clone = self.clone();
+                let peer_writing_task = tokio::spawn(async move {
+                    node_clone.listen_for_outbound_messages(receiver, &mut writer).await;
+                });
+
+                // Save the channel under the provided remote address.
+                self.outbound.channels.insert(remote_address, sender).await;
+
+                // Finally, mark the peer as connected.
+                self.peer_book
+                    .set_connected(remote_address, Some(remote_listener))
+                    .await;
+
+                trace!("Connected to {}", remote_address);
+
+                // Immediately send a ping to provide the peer with our block height.
+                self.send_ping(remote_address).await;
+
+                if let Ok(ref peer) = self.peer_book.get_peer(remote_address).await {
+                    peer.register_task(peer_reading_task);
+                    peer.register_task(peer_writing_task);
+                } else {
+                    // If the related peer is not found, it means it's already been dropped.
+                    peer_reading_task.abort();
+                    peer_writing_task.abort();
+                }
+            },
+            Ok(Err(e)) => {
+                error!("Failed to accept a connection request: {}", e);
+                self.disconnect_from_peer(remote_address).await;
+                metrics::increment_counter!(stats::HANDSHAKES_FAILURES_RESP);
+            }
+            Err(_) => {
+                error!("Failed to accept a connection request: the handshake timed out");
+                self.disconnect_from_peer(remote_address).await;
+                metrics::increment_counter!(stats::HANDSHAKES_TIMEOUTS_RESP);
+            }
+        }
+    }
+
     /// This method handles new inbound connection requests.
     pub async fn listen(&self) -> Result<(), NetworkError> {
         let listener = TcpListener::bind(&self.config.desired_address).await?;
@@ -77,70 +139,9 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
             loop {
                 match listener.accept().await {
                     Ok((stream, remote_address)) => {
-                        info!("Got a connection request from {}", remote_address);
-
-                        if !node_clone.can_connect() {
-                            metrics::increment_counter!(stats::CONNECTIONS_ALL_REJECTED);
-                            continue;
-                        }
-
-                        let node = node_clone.clone();
-                        task::spawn(async move {
-                            // Wait a maximum timeout limit for a connection request.
-                            let handshake_result = tokio::time::timeout(
-                                Duration::from_secs(crate::HANDSHAKE_PEER_TIMEOUT_SECS as u64),
-                                node.connection_request(listener_address, remote_address, stream),
-                            )
-                            .await;
-
-                            match handshake_result {
-                                Ok(Ok((mut writer, mut reader, remote_listener))) => {
-                                    // Create a channel dedicated to sending messages to the connection.
-                                    let (sender, receiver) = channel(crate::OUTBOUND_CHANNEL_DEPTH);
-
-                                    // Listen for inbound messages.
-                                    let node_clone = node.clone();
-                                    let peer_reading_task = tokio::spawn(async move {
-                                        node_clone.listen_for_inbound_messages(&mut reader).await;
-                                    });
-
-                                    // Listen for outbound messages.
-                                    let node_clone = node.clone();
-                                    let peer_writing_task = tokio::spawn(async move {
-                                        node_clone.listen_for_outbound_messages(receiver, &mut writer).await;
-                                    });
-
-                                    // Save the channel under the provided remote address.
-                                    node.outbound.channels.write().insert(remote_listener, sender);
-
-                                    // Finally, mark the peer as connected.
-                                    node.peer_book.set_connected(remote_address, Some(remote_listener));
-
-                                    trace!("Connected to {} (listener: {})", remote_address, remote_listener);
-
-                                    // Immediately send a ping to provide the peer with our block height.
-                                    node.send_ping(remote_listener);
-
-                                    if let Ok(ref peer) = node.peer_book.get_peer(remote_listener) {
-                                        peer.register_task(peer_reading_task, true);
-                                        peer.register_task(peer_writing_task, false);
-                                    } else {
-                                        // If the related peer is not found, it means it's already been dropped.
-                                        peer_reading_task.abort();
-                                        peer_writing_task.abort();
-                                    }
-                                }
-                                Ok(Err(e)) => {
-                                    error!("Failed to accept a connection request: {}", e);
-                                    node.disconnect_from_peer(remote_address);
-                                    metrics::increment_counter!(stats::HANDSHAKES_FAILURES_RESP);
-                                }
-                                Err(_) => {
-                                    error!("Failed to accept a connection request: the handshake timed out");
-                                    node.disconnect_from_peer(remote_address);
-                                    metrics::increment_counter!(stats::HANDSHAKES_TIMEOUTS_RESP);
-                                }
-                            }
+                        let node_clone = node_clone.clone();
+                        tokio::spawn(async move {
+                            node_clone.handle_connection(stream, remote_address, listener_address).await;
                         });
 
                         // add a tiny delay to avoid connecting above the limit
@@ -177,7 +178,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
                     match disconnect_from_peer {
                         true => {
                             warn!("Disconnecting from {} (unreliable)", reader.addr);
-                            self.disconnect_from_peer(reader.addr);
+                            self.disconnect_from_peer(reader.addr).await;
                             // The error has been handled and reported, we may now safely break.
                             break;
                         }
@@ -237,21 +238,21 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
                 metrics::increment_counter!(stats::INBOUND_TRANSACTIONS);
 
                 if let Some(ref sync) = self.sync() {
-                    sync.received_memory_pool_transaction(source, transaction)?;
+                    sync.received_memory_pool_transaction(source, transaction).await?;
                 }
             }
             Payload::Block(block) => {
                 metrics::increment_counter!(stats::INBOUND_BLOCKS);
 
                 if let Some(ref sync) = self.sync() {
-                    sync.received_block(source, block, true)?;
+                    sync.received_block(source, block, true).await?;
                 }
             }
             Payload::SyncBlock(block) => {
                 metrics::increment_counter!(stats::INBOUND_SYNCBLOCKS);
 
                 if let Some(ref sync) = self.sync() {
-                    sync.received_block(source, block, false)?;
+                    sync.received_block(source, block, false).await?;
 
                     // Update the peer and possibly finish the sync process.
                     if self.peer_book.got_sync_block(source) {
@@ -277,7 +278,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
                 metrics::increment_counter!(stats::INBOUND_MEMORYPOOL);
 
                 if let Some(ref sync) = self.sync() {
-                    sync.received_memory_pool(mempool)?;
+                    sync.received_memory_pool(mempool).await?;
                 }
             }
             Payload::GetSync(getsync) => {
@@ -310,7 +311,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
             Payload::Peers(peers) => {
                 metrics::increment_counter!(stats::INBOUND_PEERS);
 
-                self.process_inbound_peers(peers);
+                self.process_inbound_peers(peers).await;
             }
             Payload::Ping(block_height) => {
                 metrics::increment_counter!(stats::INBOUND_PINGS);
@@ -339,7 +340,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
         remote_address: SocketAddr,
         stream: TcpStream,
     ) -> Result<(ConnWriter, ConnReader, SocketAddr), NetworkError> {
-        self.peer_book.set_connecting(remote_address)?;
+        self.peer_book.set_connecting(remote_address).await?;
 
         let (mut reader, mut writer) = stream.into_split();
 

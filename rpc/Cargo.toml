@@ -18,17 +18,17 @@ license = "GPL-3.0"
 edition = "2018"
 
 [dependencies.snarkvm-algorithms]
-version = "0.2.2"
+version = "0.3.1"
 default-features = false
 
 [dependencies.snarkvm-dpc]
-version = "0.2.2"
+version = "0.3.1"
 
 [dependencies.snarkvm-objects]
-version = "0.2.2"
+version = "0.3.1"
 
 [dependencies.snarkvm-utilities]
-version = "0.2.2"
+version = "0.3.1"
 
 [dependencies.snarkos-consensus]
 path = "../consensus"
@@ -77,11 +77,11 @@ version = "17"
 [dependencies.jsonrpc-http-server]
 version = "17"
 
-[dependencies.parking_lot]
-version = "0.11.1"
-
 [dependencies.rand]
 version = "0.8"
+
+[dependencies.futures]
+version = "0.3"
 
 [dependencies.serde]
 version = "1.0"

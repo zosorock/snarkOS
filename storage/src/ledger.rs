@@ -20,21 +20,16 @@ use snarkvm_algorithms::{merkle_tree::MerkleTree, traits::LoadableMerkleParamete
 use snarkvm_objects::{errors::StorageError, Block, DatabaseTransaction, LedgerScheme, Op, Storage, Transaction};
 use snarkvm_parameters::{traits::genesis::Genesis, LedgerMerkleTreeParameters, Parameter};
 use snarkvm_utilities::bytes::FromBytes;
+use arc_swap::ArcSwap;
 
-use parking_lot::RwLock;
-use std::{
-    fs,
-    marker::PhantomData,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::{fs, marker::PhantomData, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU32, Ordering}}};
 
 pub type BlockHeight = u32;
 
 pub struct Ledger<T: Transaction, P: LoadableMerkleParameters, S: Storage> {
     pub current_block_height: AtomicU32,
-    pub ledger_parameters: P,
-    pub cm_merkle_tree: RwLock<MerkleTree<P>>,
+    pub ledger_parameters: Arc<P>,
+    pub cm_merkle_tree: ArcSwap<MerkleTree<P>>,
     pub storage: S,
     pub _transaction: PhantomData<T>,
 }
@@ -49,7 +44,7 @@ impl<T: Transaction, P: LoadableMerkleParameters, S: Storage> Ledger<T, P, S> {
             Self::open_at_path(path)
         } else {
             let crh = P::H::from(FromBytes::read(&LedgerMerkleTreeParameters::load_bytes()?[..])?);
-            let ledger_parameters = P::from(crh);
+            let ledger_parameters = Arc::new(P::from(crh));
 
             let genesis_block: Block<T> = FromBytes::read(GenesisBlock::load_bytes().as_slice())?;
 
@@ -118,7 +113,7 @@ impl<T: Transaction, P: LoadableMerkleParameters, S: Storage> Ledger<T, P, S> {
         };
 
         let crh = P::H::from(FromBytes::read(&LedgerMerkleTreeParameters::load_bytes()?[..])?);
-        let ledger_parameters = P::from(crh);
+        let ledger_parameters = Arc::new(P::from(crh));
 
         match latest_block_number {
             Some(val) => {
@@ -146,7 +141,7 @@ impl<T: Transaction, P: LoadableMerkleParameters, S: Storage> Ledger<T, P, S> {
                 Ok(Self {
                     current_block_height: AtomicU32::new(bytes_to_u32(&val)),
                     storage,
-                    cm_merkle_tree: RwLock::new(merkle_tree),
+                    cm_merkle_tree: ArcSwap::new(Arc::new(merkle_tree)),
                     ledger_parameters,
                     _transaction: PhantomData,
                 })
@@ -156,7 +151,7 @@ impl<T: Transaction, P: LoadableMerkleParameters, S: Storage> Ledger<T, P, S> {
 
                 let genesis_block: Block<T> = FromBytes::read(GenesisBlock::load_bytes().as_slice())?;
 
-                let ledger_storage = Self::new(Some(&path.as_ref()), ledger_parameters, genesis_block)
+                let ledger_storage = Self::new(Some(&path.as_ref()), ledger_parameters.clone(), genesis_block)
                     .expect("Ledger could not be instantiated");
 
                 // If there did not exist a primary ledger at the path,

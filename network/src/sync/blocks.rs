@@ -58,7 +58,7 @@ impl<S: Storage + Send + std::marker::Sync + 'static> Sync<S> {
     }
 
     /// A peer has sent us a new block to process.
-    pub(crate) fn received_block(
+    pub(crate) async fn received_block(
         &self,
         remote_address: SocketAddr,
         block: Vec<u8>,
@@ -97,7 +97,7 @@ impl<S: Storage + Send + std::marker::Sync + 'static> Sync<S> {
         );
 
         // Verify the block and insert it into the storage.
-        let block_validity = self.consensus.receive_block(&block_struct);
+        let block_validity = self.consensus.receive_block(&block_struct).await;
 
         if let Err(ConsensusError::PreExistingBlock) = block_validity {
             if is_block_new {

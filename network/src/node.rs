@@ -19,8 +19,7 @@ use snarkvm_objects::Storage;
 
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
-use parking_lot::Mutex;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{Rng, prelude::SliceRandom, thread_rng};
 use std::{
     net::SocketAddr,
     ops::Deref,
@@ -44,7 +43,7 @@ pub enum State {
 pub struct StateCode(AtomicU8);
 
 /// The internal state of a node.
-pub struct InnerNode<S: Storage> {
+pub struct InnerNode<S: Storage + core::marker::Sync + Send> {
     /// The node's random numeric identifier.
     pub id: u64,
     /// The current state of the node.
@@ -64,43 +63,19 @@ pub struct InnerNode<S: Storage> {
     /// The node's start-up timestamp.
     pub launched: DateTime<Utc>,
     /// The tasks spawned by the node.
-    tasks: Mutex<Vec<task::JoinHandle<()>>>,
+    tasks: DropJoin<task::JoinHandle<()>>,
     /// The threads spawned by the node.
-    threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    threads: DropJoin<thread::JoinHandle<()>>,
     /// An indicator of whether the node is shutting down.
     shutting_down: AtomicBool,
-}
-
-impl<S: Storage> Drop for InnerNode<S> {
-    // this won't make a difference in regular scenarios, but will be practical for test
-    // purposes, so that there are no lingering tasks
-    fn drop(&mut self) {
-        // since we're going out of scope, we don't care about holding the read lock here
-        // also, the connections are going to be broken automatically, so we only need to
-        // take care of the associated tasks here
-        for peer_info in self.peer_book.connected_peers().values() {
-            for (handle, _abortable) in peer_info.tasks.lock().drain(..).rev() {
-                // We're already shutting down, so always abort.
-                handle.abort();
-            }
-        }
-
-        for handle in self.threads.lock().drain(..).rev() {
-            let _ = handle.join().map_err(|e| error!("Can't join a thread: {:?}", e));
-        }
-
-        for handle in self.tasks.lock().drain(..).rev() {
-            handle.abort();
-        }
-    }
 }
 
 /// A core data structure for operating the networking stack of this node.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct Node<S: Storage>(Arc<InnerNode<S>>);
+pub struct Node<S: Storage + core::marker::Sync + Send>(Arc<InnerNode<S>>);
 
-impl<S: Storage> Deref for Node<S> {
+impl<S: Storage + core::marker::Sync + Send> Deref for Node<S> {
     type Target = Arc<InnerNode<S>>;
 
     fn deref(&self) -> &Self::Target {
@@ -108,7 +83,7 @@ impl<S: Storage> Deref for Node<S> {
     }
 }
 
-impl<S: Storage> Node<S> {
+impl<S: Storage + core::marker::Sync + Send> Node<S> {
     /// Returns the current state of the node.
     #[inline]
     pub fn state(&self) -> State {
@@ -174,7 +149,7 @@ impl<S: Storage + Send + core::marker::Sync + 'static> Node<S> {
 
     pub async fn start_services(&self) {
         let node_clone = self.clone();
-        let mut receiver = self.inbound.take_receiver();
+        let mut receiver = self.inbound.take_receiver().await;
         let incoming_task = task::spawn(async move {
             let mut cache = Cache::default();
 
@@ -189,13 +164,13 @@ impl<S: Storage + Send + core::marker::Sync + 'static> Node<S> {
         });
         self.register_task(incoming_task);
 
-        let node_clone = self.clone();
+        let node_clone: Node<S> = self.clone();
         let peer_sync_interval = self.config.peer_sync_interval();
         let peering_task = task::spawn(async move {
             loop {
                 info!("Updating peers");
 
-                node_clone.update_peers();
+                node_clone.update_peers().await;
 
                 sleep(peer_sync_interval).await;
             }
@@ -279,7 +254,7 @@ impl<S: Storage + Send + core::marker::Sync + 'static> Node<S> {
 
                         // Pick a random peer of all the connected ones that claim
                         // to have a longer chain.
-                        for (peer, info) in sync_clone.node().peer_book.connected_peers().iter() {
+                        for (peer, info) in sync_clone.node().peer_book.connected_peers().inner().iter() {
                             // Fetch the current block height of this connected peer.
                             let peer_block_height = info.block_height();
 
@@ -315,28 +290,24 @@ impl<S: Storage + Send + core::marker::Sync + 'static> Node<S> {
         }
     }
 
-    pub fn shut_down(&self) {
+    pub async fn shut_down(&self) {
         debug!("Shutting down");
 
         for addr in self.connected_peers() {
-            self.disconnect_from_peer(addr);
+            self.disconnect_from_peer(addr).await;
         }
 
-        for handle in self.threads.lock().drain(..).rev() {
-            let _ = handle.join().map_err(|e| error!("Can't join a thread: {:?}", e));
-        }
+        self.threads.flush();
 
-        for handle in self.tasks.lock().drain(..).rev() {
-            handle.abort();
-        }
+        self.tasks.flush();
     }
 
     pub fn register_task(&self, handle: task::JoinHandle<()>) {
-        self.tasks.lock().push(handle);
+        self.tasks.append(handle);
     }
 
     pub fn register_thread(&self, handle: thread::JoinHandle<()>) {
-        self.threads.lock().push(handle);
+        self.threads.append(handle);
     }
 
     #[inline]

@@ -21,7 +21,7 @@ use snarkos_testing::{
     network::{handshaken_node_and_peer, spawn_2_fake_nodes, test_node, TestSetup},
     wait_until,
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
 
 use std::{
     net::SocketAddr,
@@ -516,13 +516,13 @@ async fn connection_request_spam() {
     let node = test_node(node_setup).await;
     let node_addr = node.local_address().unwrap();
 
-    let sockets = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(NUM_ATTEMPTS)));
+    let sockets = Arc::new(Mutex::new(Vec::with_capacity(NUM_ATTEMPTS)));
 
     for _ in 0..NUM_ATTEMPTS {
         let socks = sockets.clone();
         tokio::task::spawn(async move {
             if let Ok(socket) = TcpStream::connect(node_addr).await {
-                socks.lock().push(socket);
+                socks.lock().await.push(socket);
             }
         });
     }

@@ -14,10 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::{DropJoin};
+use atomic_instant::AtomicInstant;
 use snarkos_storage::BlockHeight;
 
-use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::task;
 
@@ -27,7 +28,6 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,11 +42,11 @@ pub struct PeerQuality {
     /// The current block height of this peer.
     pub block_height: AtomicU32,
     /// The timestamp of when the peer has been seen last.
-    pub last_seen: RwLock<Option<DateTime<Utc>>>,
+    pub last_seen: AtomicU64,
     /// An indicator of whether a `Pong` message is currently expected from this peer.
     pub expecting_pong: AtomicBool,
     /// The timestamp of the last `Ping` sent to the peer.
-    pub last_ping_sent: Mutex<Option<Instant>>,
+    pub last_ping_sent: AtomicInstant,
     /// The time it took to send a `Ping` to the peer and for it to respond with a `Pong`.
     pub rtt_ms: AtomicU64,
     /// The number of failures associated with the peer; grounds for dismissal.
@@ -59,7 +59,7 @@ pub struct PeerQuality {
 
 impl PeerQuality {
     pub fn is_inactive(&self, now: DateTime<Utc>) -> bool {
-        let last_seen = *self.last_seen.read();
+        let last_seen = self.last_seen();
         if let Some(last_seen) = last_seen {
             now - last_seen > chrono::Duration::seconds(crate::MAX_PEER_INACTIVITY_SECS.into())
         } else {
@@ -67,6 +67,24 @@ impl PeerQuality {
             // marks the peer with a timestamp. That being said,
             // it's safest to leave this as `true` for future-proofing.
             true
+        }
+    }
+
+    pub fn see(&self) {
+        self
+            .last_seen
+            .store(chrono::Utc::now().timestamp_millis() as u64, Ordering::SeqCst);
+    }
+
+    pub fn last_seen(&self) -> Option<DateTime<Utc>> {
+        let now = self.last_seen.load(Ordering::SeqCst);
+        if now == 0 {
+            None
+        } else {
+            Some(DateTime::from_utc(
+                NaiveDateTime::from_timestamp((now / 1000) as i64, (now % 1000) as u32),
+                Utc,
+            ))
         }
     }
 }
@@ -91,8 +109,7 @@ pub struct PeerInfo {
     /// The bool indicates whether it's abortable - otherwise it
     /// needs to be awaited instead.
     #[serde(skip)]
-    #[allow(clippy::type_complexity)]
-    pub tasks: Arc<Mutex<Vec<(task::JoinHandle<()>, bool)>>>,
+    tasks: DropJoin<task::JoinHandle<()>>,
 }
 
 impl PeerInfo {
@@ -132,7 +149,15 @@ impl PeerInfo {
     ///
     #[inline]
     pub fn last_seen(&self) -> Option<DateTime<Utc>> {
-        *self.quality.last_seen.read()
+        let now = self.quality.last_seen.load(Ordering::SeqCst);
+        if now == 0 {
+            None
+        } else {
+            Some(DateTime::from_utc(
+                NaiveDateTime::from_timestamp((now / 1000) as i64, (now % 1000) as u32),
+                Utc,
+            ))
+        }
     }
 
     ///
@@ -168,7 +193,7 @@ impl PeerInfo {
             self.first_seen = Some(now);
         }
         self.last_connected = Some(now);
-        *self.quality.last_seen.write() = Some(now);
+        self.quality.see();
         self.connected_count += 1;
     }
 
@@ -183,21 +208,10 @@ impl PeerInfo {
         self.quality.expecting_pong.store(false, Ordering::SeqCst);
         self.quality.remaining_sync_blocks.store(0, Ordering::SeqCst);
 
-        for (handle, abortable) in self.tasks.lock().drain(..).rev() {
-            if abortable {
-                handle.abort();
-            } else {
-                task::spawn(async move {
-                    // An arbitrary amount of time to allow the task to shut down cleanly.
-                    if tokio::time::timeout(Duration::from_secs(5), handle).await.is_err() {
-                        warn!("One of the per-connection tasks didn't shut down cleanly");
-                    }
-                });
-            }
-        }
+        self.tasks.flush();
     }
 
-    pub(crate) fn register_task(&self, handle: task::JoinHandle<()>, abortable: bool) {
-        self.tasks.lock().push((handle, abortable));
+    pub(crate) fn register_task(&self, handle: task::JoinHandle<()>) {
+        self.tasks.append(handle);
     }
 }

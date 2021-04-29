@@ -257,7 +257,7 @@ impl<S: Storage + Send + Sync + 'static> RpcImpl<S> {
         let address: SocketAddr = serde_json::from_value(value[0].clone())
             .map_err(|e| JsonRPCError::invalid_params(format!("Invalid params: {}.", e)))?;
 
-        self.node.disconnect_from_peer(address);
+        self.node.disconnect_from_peer(address).await;
 
         Ok(Value::Null)
     }

@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
 use crate::{
     dpc::{generate_test_accounts, setup_or_load_parameters},
     storage::*,
@@ -45,7 +47,7 @@ pub static FIXTURE_VK: Lazy<Fixture<LedgerStorage>> = Lazy::new(|| setup(true));
 pub struct Fixture<S: Storage> {
     pub parameters: <InstantiatedDPC as DPCScheme<MerkleTreeLedger<S>>>::NetworkParameters,
     pub test_accounts: [Account<Components>; 3],
-    pub ledger_parameters: CommitmentMerkleParameters,
+    pub ledger_parameters: Arc<CommitmentMerkleParameters>,
     pub genesis_block: Block<Tx>,
     pub program: NoopProgram<Components, <Components as BaseDPCComponents>::NoopProgramSNARK>,
     pub rng: XorShiftRng,
