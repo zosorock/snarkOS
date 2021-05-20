@@ -196,7 +196,7 @@ impl PeerBook {
         let listener = if let Some(addr) = listener { addr } else { address };
 
         // Remove the address from the connecting peers, if it exists.
-        let mut peer_info = match self.disconnected_peers.remove(listener.clone()).await {
+        let mut peer_info = match self.disconnected_peers.remove(listener).await {
             // Case 1 - A previously known peer.
             Some(peer_info) => {
                 metrics::decrement_gauge!(stats::CONNECTIONS_DISCONNECTED, 1.0);
@@ -226,13 +226,13 @@ impl PeerBook {
     ///
     pub async fn set_disconnected(&self, address: SocketAddr) -> bool {
         // Case 1 - The given address is a connecting peer, attempt to disconnect.
-        if self.connecting_peers.remove(address.clone()).await.is_some() {
+        if self.connecting_peers.remove(address).await.is_some() {
             metrics::decrement_gauge!(stats::CONNECTIONS_CONNECTING, 1.0);
             return true;
         }
 
         // Case 2 - The given address is a connected peer, attempt to disconnect.
-        if let Some(mut peer_info) = self.connected_peers.remove(address.clone()).await {
+        if let Some(mut peer_info) = self.connected_peers.remove(address).await {
             // Update the peer info to disconnected.
             peer_info.set_disconnected();
 
@@ -301,7 +301,7 @@ impl PeerBook {
         let _ = self.set_disconnected(*address).await;
 
         // Remove the address from the disconnected peers, if it exists.
-        self.disconnected_peers.remove(address.clone()).await;
+        self.disconnected_peers.remove(address).await;
     }
 
     fn peer_quality(&self, addr: SocketAddr) -> Option<Arc<PeerQuality>> {

@@ -52,7 +52,7 @@ impl<S: Storage + Send + Sync + 'static> MinerInstance<S> {
         let mut mining_failure_count = 0;
         let mining_failure_threshold = 10;
 
-        let mining_thread = task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             loop {
                 if self.node.is_shutting_down() {
                     debug!("The node is shutting down, stopping mining");
@@ -114,8 +114,6 @@ impl<S: Storage + Send + Sync + 'static> MinerInstance<S> {
 
                 self.node.expect_sync().propagate_block(serialized_block, local_address);
             }
-        });
-
-        mining_thread
+        })
     }
 }

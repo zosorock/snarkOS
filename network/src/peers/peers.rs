@@ -438,7 +438,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
 
         // If the peer was truly disconnected, remove its channel and advise.
         if was_connected {
-            self.outbound.channels.remove(remote_address.clone()).await;
+            self.outbound.channels.remove(remote_address).await;
             trace!("Disconnected from {}", remote_address);
         }
     }

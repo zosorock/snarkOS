@@ -73,11 +73,11 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
     ///
     #[inline]
     fn outbound_channel(&self, remote_address: SocketAddr) -> Result<mpsc::Sender<Message>, NetworkError> {
-        Ok(self
+        self
             .outbound
             .channels
             .get(&remote_address)
-            .ok_or(NetworkError::OutboundChannelMissing)?)
+            .ok_or(NetworkError::OutboundChannelMissing)
     }
 
     pub async fn send_ping(&self, remote_address: SocketAddr) {
