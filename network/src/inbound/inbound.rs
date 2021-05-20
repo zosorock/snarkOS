@@ -19,7 +19,15 @@ use crate::{errors::NetworkError, message::*, stats, Cache, ConnReader, ConnWrit
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use snarkvm_objects::Storage;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{Mutex, mpsc::{channel, error::TrySendError}}, task};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{
+        mpsc::{channel, error::TrySendError},
+        Mutex,
+    },
+    task,
+};
 
 /// A stateless component for handling inbound network traffic.
 #[derive(Debug)]
@@ -54,7 +62,6 @@ impl Inbound {
 }
 
 impl<S: Storage + Send + Sync + 'static> Node<S> {
-
     async fn handle_connection(&self, stream: TcpStream, remote_address: SocketAddr, listener_address: SocketAddr) {
         info!("Got a connection request from {}", remote_address);
 
@@ -110,7 +117,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
                     peer_reading_task.abort();
                     peer_writing_task.abort();
                 }
-            },
+            }
             Ok(Err(e)) => {
                 error!("Failed to accept a connection request: {}", e);
                 self.disconnect_from_peer(remote_address).await;
@@ -141,7 +148,9 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
                     Ok((stream, remote_address)) => {
                         let node_clone = node_clone.clone();
                         tokio::spawn(async move {
-                            node_clone.handle_connection(stream, remote_address, listener_address).await;
+                            node_clone
+                                .handle_connection(stream, remote_address, listener_address)
+                                .await;
                         });
 
                         // add a tiny delay to avoid connecting above the limit

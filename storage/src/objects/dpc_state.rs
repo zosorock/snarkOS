@@ -123,7 +123,8 @@ impl<T: Transaction, P: LoadableMerkleParameters, S: Storage> Ledger<T, P, S> {
         let new_commitments = new_cm_and_indices.into_iter().map(|(cm, _)| cm);
 
         let merkle = self.cm_merkle_tree.load();
-        self.cm_merkle_tree.store(Arc::new(merkle.rebuild(old_commitments, new_commitments)?));
+        self.cm_merkle_tree
+            .store(Arc::new(merkle.rebuild(old_commitments, new_commitments)?));
 
         Ok(())
     }

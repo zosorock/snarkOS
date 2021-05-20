@@ -15,14 +15,22 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::*;
+use arc_swap::ArcSwap;
 use snarkos_parameters::GenesisBlock;
 use snarkvm_algorithms::{merkle_tree::MerkleTree, traits::LoadableMerkleParameters};
 use snarkvm_objects::{errors::StorageError, Block, DatabaseTransaction, LedgerScheme, Op, Storage, Transaction};
 use snarkvm_parameters::{traits::genesis::Genesis, LedgerMerkleTreeParameters, Parameter};
 use snarkvm_utilities::bytes::FromBytes;
-use arc_swap::ArcSwap;
 
-use std::{fs, marker::PhantomData, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU32, Ordering}}};
+use std::{
+    fs,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+};
 
 pub type BlockHeight = u32;
 

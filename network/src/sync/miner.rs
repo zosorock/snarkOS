@@ -20,7 +20,7 @@ use snarkos_consensus::Miner;
 use snarkvm_dpc::{base_dpc::instantiated::*, AccountAddress};
 use snarkvm_objects::Storage;
 
-use tokio::{task};
+use tokio::task;
 use tracing::*;
 
 use std::{sync::Arc, thread, time::Duration};

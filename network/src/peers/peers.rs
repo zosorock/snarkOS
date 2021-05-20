@@ -17,7 +17,12 @@
 use crate::{message::*, stats, ConnReader, ConnWriter, NetworkError, Node, Version};
 use snarkvm_objects::Storage;
 
-use std::{cmp, net::SocketAddr, sync::{atomic::Ordering, Arc}, time::{Duration}};
+use std::{
+    cmp,
+    net::SocketAddr,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 use rand::seq::IteratorRandom;
 use tokio::{

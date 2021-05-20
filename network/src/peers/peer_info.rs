@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{DropJoin};
+use crate::DropJoin;
 use atomic_instant::AtomicInstant;
 use snarkos_storage::BlockHeight;
 
@@ -71,8 +71,7 @@ impl PeerQuality {
     }
 
     pub fn see(&self) {
-        self
-            .last_seen
+        self.last_seen
             .store(chrono::Utc::now().timestamp_millis() as u64, Ordering::SeqCst);
     }
 

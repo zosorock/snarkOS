@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use mpmc_map::MpmcMap;
 use snarkvm_objects::Storage;
 
-use std::{net::SocketAddr};
+use std::net::SocketAddr;
 
 /// A core data structure for handling outbound network traffic.
 #[derive(Debug, Default)]
@@ -72,7 +72,7 @@ impl<S: Storage + Send + Sync + 'static> Node<S> {
     /// Establishes an outbound channel to the given remote address, if it does not exist.
     ///
     #[inline]
-     fn outbound_channel(&self, remote_address: SocketAddr) -> Result<mpsc::Sender<Message>, NetworkError> {
+    fn outbound_channel(&self, remote_address: SocketAddr) -> Result<mpsc::Sender<Message>, NetworkError> {
         Ok(self
             .outbound
             .channels

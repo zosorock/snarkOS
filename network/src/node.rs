@@ -19,7 +19,7 @@ use snarkvm_objects::Storage;
 
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
-use rand::{Rng, prelude::SliceRandom, thread_rng};
+use rand::{prelude::SliceRandom, thread_rng, Rng};
 use std::{
     net::SocketAddr,
     ops::Deref,
