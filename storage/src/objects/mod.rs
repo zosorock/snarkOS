@@ -31,3 +31,6 @@ pub use transaction::*;
 
 pub mod address;
 pub use address::*;
+
+pub mod peer;
+pub use peer::*;

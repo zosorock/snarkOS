@@ -29,7 +29,7 @@ mod consensus_dpc {
     };
     use snarkvm_utilities::{to_bytes_le, ToBytes};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn base_dpc_multiple_transactions() {
         let program = FIXTURE.program.clone();
         let [_genesis_address, miner_acc, recipient] = FIXTURE.test_accounts.clone();
@@ -40,8 +40,10 @@ mod consensus_dpc {
             .await
             .unwrap();
 
+        let canon_height = consensus.storage.canon().await.unwrap().block_height as u32;
+
         println!("Creating block with coinbase transaction");
-        let (transactions, coinbase_records) = miner.establish_block(vec![]).await.unwrap();
+        let (transactions, coinbase_records) = miner.establish_block(canon_height + 1, vec![]).await.unwrap();
         let previous_block_header = genesis().header.into();
         let header = miner
             .find_block(&transactions, &previous_block_header, &AtomicBool::new(false))
@@ -154,7 +156,11 @@ mod consensus_dpc {
         assert!(consensus.verify_transactions(vec![transaction.clone()]).await);
 
         println!("Create a new block with the payment transaction");
-        let (transactions, new_coinbase_records) = miner.establish_block(vec![transaction.clone()]).await.unwrap();
+        let canon_height = consensus.storage.canon().await.unwrap().block_height as u32;
+        let (transactions, new_coinbase_records) = miner
+            .establish_block(canon_height + 1, vec![transaction.clone()])
+            .await
+            .unwrap();
 
         assert!(consensus.verify_transactions(transactions.clone()).await);
 

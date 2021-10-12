@@ -17,6 +17,7 @@
 use std::{convert::TryInto, sync::Arc};
 
 use rand::{thread_rng, Rng};
+use snarkos_metrics::wrapped_mpsc;
 use snarkos_storage::{Address, Digest, DynStorage, SerialBlock, SerialRecord, SerialTransaction, VMRecord};
 use snarkvm_algorithms::CRH;
 use snarkvm_dpc::{
@@ -32,7 +33,7 @@ use snarkvm_dpc::{
     ProgramScheme,
 };
 use snarkvm_utilities::{to_bytes_le, ToBytes};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::{error::ConsensusError, ConsensusParameters, DynLedger, MemoryPool};
 
@@ -44,17 +45,18 @@ mod message;
 pub use message::*;
 mod utility;
 
+#[derive(Clone)]
 pub struct Consensus {
     pub parameters: ConsensusParameters,
     pub dpc: Arc<Testnet1DPC>,
     pub storage: DynStorage,
     genesis_block: SerialBlock,
-    sender: mpsc::Sender<ConsensusMessageWrapped>,
+    sender: wrapped_mpsc::Sender<ConsensusMessageWrapped>,
 }
 
 impl Consensus {
     /// Creates a new consensus instance with the given parameters, genesis, ledger, storage, and memory pool.
-    pub fn new(
+    pub async fn new(
         parameters: ConsensusParameters,
         dpc: Arc<Testnet1DPC>,
         genesis_block: SerialBlock,
@@ -62,7 +64,7 @@ impl Consensus {
         storage: DynStorage,
         memory_pool: MemoryPool,
     ) -> Arc<Self> {
-        let (sender, receiver) = mpsc::channel(256);
+        let (sender, receiver) = wrapped_mpsc::channel(snarkos_metrics::queues::CONSENSUS, 256);
         let created = Arc::new(Self {
             parameters,
             dpc,
@@ -78,10 +80,19 @@ impl Consensus {
                 ledger,
                 storage,
                 memory_pool,
+                recommit_taint: None,
             }
             .agent(receiver)
             .await;
         });
+
+        if let Err(e) = created.fast_forward().await {
+            match e {
+                ConsensusError::InvalidBlock(e) => debug!("invalid block in initial fast-forward: {}", e),
+                e => warn!("failed to perform initial fast-forward: {:?}", e),
+            }
+        };
+        info!("fastforwarding complete");
 
         created
     }
@@ -90,7 +101,6 @@ impl Consensus {
     async fn send<T: Send + Sync + 'static>(&self, message: ConsensusMessage) -> T {
         let (sender, receiver) = oneshot::channel();
         self.sender.send((message, sender)).await.ok();
-        metrics::increment_gauge!(snarkos_metrics::queues::CONSENSUS, 1.0);
         *receiver
             .await
             .ok()
@@ -114,6 +124,11 @@ impl Consensus {
     /// Receives any block into consensus
     pub async fn receive_block(&self, block: SerialBlock) -> bool {
         self.send(ConsensusMessage::ReceiveBlock(Box::new(block))).await
+    }
+
+    pub async fn shallow_receive_block(&self, block: SerialBlock) -> Result<()> {
+        self.storage.insert_block(&block).await?;
+        Ok(())
     }
 
     /// Fetches a snapshot of the memory pool
@@ -145,19 +160,15 @@ impl Consensus {
         self.send(ConsensusMessage::ForceDecommit(hash.0.to_vec())).await
     }
 
-    /// Initiate a fast forward operation
+    /// Run a fast forward operation
     /// Used for testing/rectifying use of `force_decommit`
     pub async fn fast_forward(&self) -> Result<(), ConsensusError> {
         self.send(ConsensusMessage::FastForward()).await
     }
 
-    /// Diagnostic function to scan for valid forks
-    pub async fn scan_forks(&self) -> Result<Vec<(Digest, Digest)>> {
-        self.send(ConsensusMessage::ScanForks()).await
-    }
-
-    /// Diagnostic function to rebuild the stored ledger components
-    pub async fn recommit_canon(&self) -> Result<()> {
-        self.send(ConsensusMessage::RecommitCanon()).await
+    /// Fully reset the ledger and the storage
+    #[cfg(feature = "test")]
+    pub async fn reset(&self) -> Result<()> {
+        self.send(ConsensusMessage::Reset()).await
     }
 }

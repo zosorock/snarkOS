@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use snarkos_network::{topology::calculate_density, Node};
+use snarkos_network::{topology::calculate_density, Node, NodeType};
 use snarkos_testing::{
     network::{
         test_node,
@@ -28,11 +28,11 @@ const N: usize = 25;
 const MIN_PEERS: u16 = 5;
 const MAX_PEERS: u16 = 30;
 
-async fn test_nodes(n: usize, setup: TestSetup) -> Vec<Node> {
+async fn test_nodes<F: Fn() -> TestSetup>(n: usize, setup: F) -> Vec<Node> {
     let mut nodes = Vec::with_capacity(n);
 
     for _ in 0..n {
-        nodes.push(test_node(setup.clone()).await);
+        nodes.push(test_node(setup()).await);
 
         // Nodes are started with a slight delay to avoid having peering intervals in phase (this
         // is the hypothetical worst case scenario).
@@ -43,8 +43,44 @@ async fn test_nodes(n: usize, setup: TestSetup) -> Vec<Node> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reconnect_nodes() {
+    // tracing_subscriber::fmt::init();
+    let setup = || TestSetup {
+        consensus_setup: None,
+        peer_sync_interval: 999999,
+        max_peers: N as u16 * 4,
+        ..Default::default()
+    };
+    let nodes = test_nodes(N, setup).await;
+    let addresses = nodes.iter().map(|x| x.expect_local_addr()).collect::<Vec<_>>();
+
+    for _ in 0..(4 * N) {
+        for (i, node) in nodes.iter().enumerate() {
+            node.connect_to_addresses(&addresses[i + 1..]).await;
+        }
+        wait_until!(5, {
+            nodes
+                .iter()
+                .all(|node| node.peer_book.get_connected_peer_count() == N as u32 - 1)
+        });
+        for node in &nodes {
+            assert_eq!(node.peer_book.pending_connections(), 0);
+        }
+
+        for node in &nodes {
+            for address in &addresses {
+                node.disconnect_from_peer(*address).await;
+            }
+        }
+        wait_until!(5, {
+            nodes.iter().all(|node| node.peer_book.get_active_peer_count() == 0)
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn spawn_nodes_in_a_line() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         ..Default::default()
@@ -64,7 +100,7 @@ async fn spawn_nodes_in_a_line() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_nodes_in_a_ring() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         ..Default::default()
@@ -79,7 +115,7 @@ async fn spawn_nodes_in_a_ring() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_nodes_in_a_star() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         ..Default::default()
@@ -93,7 +129,7 @@ async fn spawn_nodes_in_a_star() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_nodes_in_a_mesh() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 5,
         min_peers: MIN_PEERS,
@@ -122,7 +158,7 @@ async fn spawn_nodes_in_a_mesh() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn line_converges_to_mesh() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         min_peers: MIN_PEERS,
@@ -142,7 +178,7 @@ async fn line_converges_to_mesh() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ring_converges_to_mesh() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         min_peers: MIN_PEERS,
@@ -162,7 +198,7 @@ async fn ring_converges_to_mesh() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn star_converges_to_mesh() {
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         min_peers: MIN_PEERS,
@@ -170,16 +206,16 @@ async fn star_converges_to_mesh() {
         ..Default::default()
     };
 
-    // A bootnode will be necessary at the center of the star for peers to get propagated.
+    // A beacon node will be necessary at the center of the star for peers to get propagated.
     let hub_setup = TestSetup {
-        is_bootnode: true,
-        ..setup.clone()
+        node_type: NodeType::Beacon,
+        ..setup()
     };
 
     // Create the regular nodes.
     let mut nodes = test_nodes(N - 1, setup).await;
 
-    // Insert the bootnode at the head of the list.
+    // Insert the beacon at the head of the list.
     nodes.insert(0, test_node(hub_setup).await);
 
     connect_nodes(&mut nodes, Topology::Star).await;
@@ -195,36 +231,36 @@ async fn star_converges_to_mesh() {
 #[tokio::test(flavor = "multi_thread")]
 async fn binary_star_contact() {
     // Two initally separate star topologies subsequently connected by a single node connecting to
-    // their bootnodes.
+    // the beacons at their center.
 
-    // Setup the bootnodes for each star topology.
-    let bootnode_setup = TestSetup {
+    // Setup the beacons for each star topology.
+    let beacon_setup = || TestSetup {
+        node_type: NodeType::Beacon,
         consensus_setup: None,
         peer_sync_interval: 1,
-        is_bootnode: true,
         ..Default::default()
     };
 
-    let bootnode_a = test_node(bootnode_setup.clone()).await;
-    let bootnode_b = test_node(bootnode_setup).await;
+    let beacon_a = test_node(beacon_setup()).await;
+    let beacon_b = test_node(beacon_setup()).await;
 
-    let ba = bootnode_a.local_address().unwrap().to_string();
-    let bb = bootnode_b.local_address().unwrap().to_string();
+    let ba = beacon_a.expect_local_addr().to_string();
+    let bb = beacon_b.expect_local_addr().to_string();
 
     // Create the nodes to be used as the leafs in the stars.
-    let setup = TestSetup {
+    let setup = || TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         min_peers: MIN_PEERS,
         max_peers: MAX_PEERS,
         ..Default::default()
     };
-    let mut star_a_nodes = test_nodes(N - 1, setup.clone()).await;
+    let mut star_a_nodes = test_nodes(N - 1, setup).await;
     let mut star_b_nodes = test_nodes(N - 1, setup).await;
 
-    // Insert the bootnodes at the begining of the node lists.
-    star_a_nodes.insert(0, bootnode_a);
-    star_b_nodes.insert(0, bootnode_b);
+    // Insert the beacons at the begining of the node lists.
+    star_a_nodes.insert(0, beacon_a);
+    star_b_nodes.insert(0, beacon_b);
 
     // Create the star topologies.
     connect_nodes(&mut star_a_nodes, Topology::Star).await;
@@ -236,14 +272,14 @@ async fn binary_star_contact() {
     let mut nodes = star_a_nodes;
 
     // Single node to connect to a subset of N and K.
-    let bootnodes = vec![ba, bb];
+    let beacons = vec![ba, bb];
 
     let solo_setup = TestSetup {
         consensus_setup: None,
         peer_sync_interval: 1,
         min_peers: MIN_PEERS,
         max_peers: MAX_PEERS,
-        bootnodes,
+        beacons,
         ..Default::default()
     };
     let solo = test_node(solo_setup).await;

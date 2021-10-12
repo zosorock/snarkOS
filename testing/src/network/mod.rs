@@ -25,13 +25,14 @@ pub mod topology;
 use crate::sync::FIXTURE;
 
 use snarkos_network::{errors::*, *};
-use snarkos_storage::{key_value::KeyValueStore, MemDb};
+use snarkos_storage::{AsyncStorage, SqliteStorage};
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{tcp::OwnedReadHalf, TcpListener, TcpStream},
-    runtime,
 };
 use tracing::*;
 
@@ -95,43 +96,43 @@ impl Default for ConsensusSetup {
 
 #[derive(Clone)]
 pub struct TestSetup {
+    pub node_type: NodeType,
     pub node_id: u64,
     pub socket_address: SocketAddr,
     pub consensus_setup: Option<ConsensusSetup>,
     pub peer_sync_interval: u64,
     pub min_peers: u16,
     pub max_peers: u16,
-    pub is_bootnode: bool,
-    pub is_crawler: bool,
-    pub bootnodes: Vec<String>,
-    pub tokio_handle: Option<runtime::Handle>,
+    pub beacons: Vec<String>,
+    pub sync_providers: Vec<String>,
+    pub network_enabled: bool,
 }
 
 impl TestSetup {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        node_type: NodeType,
         node_id: u64,
         socket_address: SocketAddr,
         consensus_setup: Option<ConsensusSetup>,
         peer_sync_interval: u64,
         min_peers: u16,
         max_peers: u16,
-        is_bootnode: bool,
-        is_crawler: bool,
-        bootnodes: Vec<String>,
-        tokio_handle: Option<runtime::Handle>,
+        beacons: Vec<String>,
+        sync_providers: Vec<String>,
+        network_enabled: bool,
     ) -> Self {
         Self {
+            node_type,
             node_id,
             socket_address,
             consensus_setup,
             peer_sync_interval,
             min_peers,
             max_peers,
-            is_bootnode,
-            is_crawler,
-            bootnodes,
-            tokio_handle,
+            beacons,
+            sync_providers,
+            network_enabled,
         }
     }
 }
@@ -139,16 +140,16 @@ impl TestSetup {
 impl Default for TestSetup {
     fn default() -> Self {
         Self {
-            node_id: u64::MAX,
+            node_id: SmallRng::from_entropy().gen(),
+            node_type: NodeType::Client,
             socket_address: "127.0.0.1:0".parse().unwrap(),
             consensus_setup: Some(Default::default()),
             peer_sync_interval: 600,
             min_peers: 1,
             max_peers: 100,
-            is_bootnode: false,
-            is_crawler: false,
-            bootnodes: vec![],
-            tokio_handle: None,
+            beacons: vec![],
+            sync_providers: vec![],
+            network_enabled: true,
         }
     }
 }
@@ -167,12 +168,13 @@ pub async fn test_consensus(setup: ConsensusSetup) -> snarkos_network::Sync {
 /// Returns a `Config` struct based on the given `TestSetup`.
 pub fn test_config(setup: TestSetup) -> Config {
     Config::new(
+        Some(setup.node_id),
+        setup.node_type,
         setup.socket_address,
         setup.min_peers,
         setup.max_peers,
-        setup.bootnodes,
-        setup.is_bootnode,
-        setup.is_crawler,
+        setup.beacons,
+        setup.sync_providers,
         Duration::from_secs(setup.peer_sync_interval),
     )
     .unwrap()
@@ -183,9 +185,12 @@ pub async fn test_node(setup: TestSetup) -> Node {
     let is_miner = setup.consensus_setup.as_ref().map(|c| c.is_miner) == Some(true);
     let config = test_config(setup.clone());
     let node = match setup.consensus_setup {
-        None => Node::new(config, Arc::new(KeyValueStore::new(MemDb::new())))
-            .await
-            .unwrap(),
+        None => Node::new(
+            config,
+            Arc::new(AsyncStorage::new(SqliteStorage::new_ephemeral().unwrap())),
+        )
+        .await
+        .unwrap(),
         Some(consensus_setup) => {
             let consensus = test_consensus(consensus_setup).await;
             let mut node = Node::new(config, consensus.consensus.storage.clone()).await.unwrap();
@@ -195,12 +200,14 @@ pub async fn test_node(setup: TestSetup) -> Node {
         }
     };
 
-    node.listen().await.unwrap();
-    node.start_services().await;
+    if setup.network_enabled {
+        node.listen().await.unwrap();
+        node.start_services().await;
+    }
 
     if is_miner {
         let miner_address = FIXTURE.test_accounts[0].address.clone();
-        tokio::spawn(MinerInstance::new(miner_address, node.clone()).spawn());
+        MinerInstance::new(miner_address, node.clone()).spawn();
     }
 
     node
@@ -232,7 +239,7 @@ impl FakeNode {
         let message = match self.network.read_payload(raw) {
             Ok(msg) => {
                 let msg = Payload::deserialize(msg)?;
-                debug!("read a {}", msg);
+                debug!("{}: read a {} {:?}", self.addr, msg, msg);
                 msg
             }
             Err(e) => {
@@ -246,7 +253,7 @@ impl FakeNode {
 
     pub async fn write_message(&mut self, payload: &Payload) {
         self.network.write_payload(payload).await.unwrap();
-        debug!("wrote a message containing a {} to the stream", payload);
+        debug!("{}: wrote a message containing a {} to the stream", self.addr, payload);
     }
 
     pub async fn write_bytes(&mut self, bytes: &[u8]) {
@@ -386,7 +393,7 @@ pub async fn handshaken_peer(node_listener: SocketAddr) -> FakeNode {
 pub async fn handshaken_node_and_peer(node_setup: TestSetup) -> (Node, FakeNode) {
     // start a test node and listen for incoming connections
     let node = test_node(node_setup).await;
-    let node_listener = node.local_address().unwrap();
+    let node_listener = node.expect_local_addr();
     let fake_node = handshaken_peer(node_listener).await;
 
     (node, fake_node)

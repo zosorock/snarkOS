@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::{
     error::ConsensusError,
+    memory_pool::MempoolEntry,
     Consensus,
     ConsensusParameters,
     CreatePartialTransactionRequest,
@@ -26,8 +27,6 @@ use crate::{
 };
 use anyhow::*;
 use snarkos_storage::{
-    BlockFilter,
-    BlockOrder,
     BlockStatus,
     Digest,
     DynStorage,
@@ -41,9 +40,7 @@ use snarkvm_dpc::{
     DPCScheme,
 };
 use snarkvm_posw::txids_to_roots;
-use tokio::sync::mpsc;
-
-use snarkos_metrics::misc::*;
+use snarkvm_utilities::has_duplicates;
 
 use rand::thread_rng;
 
@@ -58,140 +55,73 @@ pub struct ConsensusInner {
     pub ledger: DynLedger,
     pub memory_pool: MemoryPool,
     pub storage: DynStorage,
-}
-
-struct LedgerData {
-    ledger: DynLedger,
-    commitments: Vec<Digest>,
-    serial_numbers: Vec<Digest>,
-    memos: Vec<Digest>,
-    ledger_digests: Vec<Digest>,
+    pub recommit_taint: Option<u32>, // height of first recommitted block
 }
 
 impl ConsensusInner {
-    /// scans uncommitted blocks with a known path to the canon chain for forks
-    async fn scan_forks(&mut self) -> Result<Vec<(Digest, Digest)>> {
-        let canon_hashes = self
-            .storage
-            .get_block_hashes(
-                Some(crate::OLDEST_FORK_THRESHOLD as u32 + 1),
-                BlockFilter::CanonOnly(BlockOrder::Descending),
-            )
-            .await?;
+    /// Adds entry to memory pool if valid in the current ledger.
+    pub(crate) fn insert_into_mempool(
+        &mut self,
+        transaction: SerialTransaction,
+    ) -> Result<Option<Digest>, ConsensusError> {
+        let transaction_id: Digest = transaction.id.into();
 
-        if canon_hashes.len() < 2 {
-            // windows will panic if len < 2
-            return Ok(vec![]);
+        if has_duplicates(&transaction.old_serial_numbers)
+            || has_duplicates(&transaction.new_commitments)
+            || self.memory_pool.transactions.contains_key(&transaction_id)
+        {
+            return Ok(None);
         }
 
-        let mut known_forks = vec![];
-
-        for canon_hashes in canon_hashes.windows(2) {
-            // windows will ignore last block (furthest down), so we pull one extra above
-            let target_hash = &canon_hashes[1];
-            let ignore_child_hash = &canon_hashes[0];
-            let children = self.storage.get_block_children(target_hash).await?;
-            if children.len() == 1 && &children[0] == ignore_child_hash {
-                continue;
-            }
-            for child in children {
-                if &child != ignore_child_hash {
-                    known_forks.push((target_hash.clone(), child));
-                }
+        for sn in &transaction.old_serial_numbers {
+            if self.ledger.contains_serial(sn) || self.memory_pool.serial_numbers.contains(sn) {
+                return Ok(None);
             }
         }
 
-        Ok(known_forks)
+        for cm in &transaction.new_commitments {
+            if self.ledger.contains_commitment(cm) || self.memory_pool.commitments.contains(cm) {
+                return Ok(None);
+            }
+        }
+
+        if self.ledger.contains_memo(&transaction.memorandum)
+            || self.memory_pool.memos.contains(&transaction.memorandum)
+        {
+            return Ok(None);
+        }
+
+        for sn in &transaction.old_serial_numbers {
+            self.memory_pool.serial_numbers.insert(sn.clone());
+        }
+
+        for cm in &transaction.new_commitments {
+            self.memory_pool.commitments.insert(cm.clone());
+        }
+
+        self.memory_pool.memos.insert(transaction.memorandum.clone());
+
+        self.memory_pool
+            .transactions
+            .insert(transaction_id.clone(), MempoolEntry {
+                size_in_bytes: transaction.size(),
+                transaction,
+            });
+
+        Ok(Some(transaction_id))
     }
 
-    fn fresh_ledger(&self, blocks: Vec<SerialBlock>) -> Result<LedgerData> {
-        let mut ledger = self.ledger.clone();
-        ledger.clear();
-        let mut new_commitments = vec![];
-        let mut new_serial_numbers = vec![];
-        let mut new_memos = vec![];
-        let mut new_digests = vec![];
-        for (i, block) in blocks.into_iter().enumerate() {
-            trace!("ledger recreation: processing block {}", i);
-            let mut commitments = vec![];
-            let mut serial_numbers = vec![];
-            let mut memos = vec![];
-            for transaction in block.transactions.iter() {
-                commitments.extend_from_slice(&transaction.new_commitments[..]);
-                serial_numbers.extend_from_slice(&transaction.old_serial_numbers[..]);
-                memos.push(transaction.memorandum.clone());
-            }
-            let digest = ledger.extend(&commitments[..], &serial_numbers[..], &memos[..])?;
-            new_commitments.extend(commitments);
-            new_serial_numbers.extend(serial_numbers);
-            new_memos.extend(memos);
-            new_digests.push(digest);
-        }
-        Ok(LedgerData {
-            ledger,
-            commitments: new_commitments,
-            serial_numbers: new_serial_numbers,
-            memos: new_memos,
-            ledger_digests: new_digests,
-        })
-    }
+    /// Cleanse the memory pool of outdated transactions.
+    pub(crate) fn cleanse_memory_pool(&mut self) -> Result<(), ConsensusError> {
+        let old_mempool = std::mem::take(&mut self.memory_pool);
 
-    #[allow(dead_code)]
-    /// diagnostic function for storage/consensus consistency issues
-    async fn diff_canon(&self) -> Result<()> {
-        let blocks = self.storage.get_canon_blocks(Some(128)).await?;
-        info!("diffing canon for {} blocks", blocks.len());
-        let data = self.fresh_ledger(blocks)?;
-        let commitments = self.storage.get_commitments().await?;
-        let serial_numbers = self.storage.get_serial_numbers().await?;
-        let memos = self.storage.get_memos().await?;
-        let ledger_digests = self.storage.get_ledger_digests().await?;
-
-        fn diff(name: &str, calculated: &[Digest], stored: &[Digest]) {
-            info!(
-                "diffing {}: {} calculated vs {} stored",
-                name,
-                calculated.len(),
-                stored.len()
-            );
-            let max_len = calculated.len().max(stored.len());
-            for i in 0..max_len {
-                if calculated.get(i) != stored.get(i) {
-                    error!(
-                        "diff {}: mismatch @ {}: {} calculated != {} stored",
-                        name,
-                        i,
-                        calculated
-                            .get(i)
-                            .map(|x| format!("{}", x))
-                            .unwrap_or_else(|| "missing".to_string()),
-                        stored
-                            .get(i)
-                            .map(|x| format!("{}", x))
-                            .unwrap_or_else(|| "missing".to_string())
-                    );
-                }
+        for (_, entry) in &old_mempool.transactions {
+            if let Err(e) = self.insert_into_mempool(entry.transaction.clone()) {
+                self.memory_pool = old_mempool;
+                return Err(e);
             }
         }
-        diff("commitments", &data.commitments[..], &commitments[..]);
-        diff("serial_numbers", &data.serial_numbers[..], &serial_numbers[..]);
-        diff("memos", &data.memos[..], &memos[..]);
-        diff("ledger_digests", &data.ledger_digests[..], &ledger_digests[..]);
-        Ok(())
-    }
 
-    /// helper function to rebuild a broken ledger index in storage.
-    /// used in debugging, preserved for future potential use
-    async fn recommit_canon(&mut self) -> Result<()> {
-        let blocks = self.storage.get_canon_blocks(None).await?;
-        let block_count = blocks.len();
-        info!("recommiting {} blocks", block_count);
-        let data = self.fresh_ledger(blocks)?;
-        self.ledger = data.ledger;
-        info!("resetting ledger for {} blocks", block_count);
-        self.storage
-            .reset_ledger(data.commitments, data.serial_numbers, data.memos, data.ledger_digests)
-            .await?;
         Ok(())
     }
 }

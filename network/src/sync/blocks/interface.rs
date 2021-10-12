@@ -24,12 +24,12 @@ use snarkos_storage::{BlockStatus, Digest, VMBlock};
 use snarkvm_dpc::{
     testnet1::{instantiated::Components, Transaction},
     Block,
-    BlockHeaderHash,
 };
 
 use snarkos_consensus::error::ConsensusError;
+use snarkos_metrics as metrics;
 
-use crate::{master::SyncInbound, message::*, NetworkError, Node, State};
+use crate::{message::*, NetworkError, Node, State, SyncInbound};
 use anyhow::*;
 use tokio::task;
 
@@ -39,12 +39,15 @@ impl Node {
         debug!("Propagating a block to peers");
 
         let connected_peers = self.connected_peers();
-        let peer_book = self.peer_book.clone();
+        let node = self.clone();
         tokio::spawn(async move {
             let mut futures = Vec::with_capacity(connected_peers.len());
-            for remote_address in connected_peers.iter() {
-                if remote_address != &block_miner {
-                    futures.push(peer_book.send_to(*remote_address, Payload::Block(block_bytes.clone(), height), None));
+            for addr in connected_peers.iter() {
+                if addr != &block_miner {
+                    futures.push(
+                        node.peer_book
+                            .send_to(*addr, Payload::Block(block_bytes.clone(), height), None),
+                    );
                 }
             }
             tokio::time::timeout(Duration::from_secs(1), futures::future::join_all(futures))
@@ -59,7 +62,7 @@ impl Node {
         remote_address: SocketAddr,
         block: Vec<u8>,
         height: Option<u32>,
-        is_block_new: bool,
+        is_non_sync: bool,
     ) -> Result<(), NetworkError> {
         let block_size = block.len();
         let max_block_size = self.expect_sync().max_block_size();
@@ -75,16 +78,16 @@ impl Node {
             )));
         }
 
-        if is_block_new {
+        // Set to `true` if the block was sent in a `Block` message, `false` if it was sent in a
+        // `SyncBlock` message.
+        if is_non_sync {
             let node_clone = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = node_clone
-                    .process_received_block(remote_address, block, height, is_block_new)
-                    .await
-                {
-                    warn!("error accepting received block: {:?}", e);
-                }
-            });
+            if let Err(e) = node_clone
+                .process_received_block(remote_address, block, height, is_non_sync)
+                .await
+            {
+                warn!("error accepting received block: {:?}", e);
+            }
         } else {
             let sender = self.master_dispatch.read().await;
             if let Some(sender) = &*sender {
@@ -92,7 +95,6 @@ impl Node {
                     .send(SyncInbound::Block(remote_address, block, height))
                     .await
                     .ok();
-                metrics::increment_gauge!(snarkos_metrics::queues::SYNC_ITEMS, 1.0);
             }
         }
         Ok(())
@@ -103,8 +105,10 @@ impl Node {
         remote_address: SocketAddr,
         block: Vec<u8>,
         height: Option<u32>,
-        is_block_new: bool,
+        is_non_sync: bool,
     ) -> Result<(), NetworkError> {
+        let now = Instant::now();
+
         let (block, block_struct) = task::spawn_blocking(move || {
             let deserialized = match Block::<Transaction<Components>>::deserialize(&block) {
                 Ok(block) => block,
@@ -113,43 +117,48 @@ impl Node {
                         "Failed to deserialize received block from {}: {}",
                         remote_address, error
                     );
-                    return Err(error);
+                    return Err(error).map_err(|e| NetworkError::Other(e.into()));
                 }
             };
 
-            Ok((block, deserialized))
+            let block_struct = <Block<Transaction<Components>> as VMBlock>::serialize(&deserialized)?;
+
+            Ok((block, block_struct))
         })
         .await
         .map_err(|e| NetworkError::Other(e.into()))??;
-        let block_struct = <Block<Transaction<Components>> as VMBlock>::serialize(&block_struct)?;
         let previous_block_hash = block_struct.header.previous_block_hash.clone();
 
         let canon = self.storage.canon().await?;
 
         info!(
-            "Received block from {} of epoch {}{} with hash {} (current head {})",
+            "Got a block from {} ({}) with hash {}... (current head {})",
             remote_address,
-            block_struct.header.time,
             if let Some(h) = height {
-                format!(" (peer's height {})", h)
+                format!("peer's height {}", h)
             } else {
-                "".to_string()
+                format!("epoch {}", block_struct.header.time)
             },
-            block_struct.header.hash(),
+            &block_struct.header.hash().to_string()[..8],
             canon.block_height,
         );
 
-        // Verify the block and insert it into the storage.
-        let block_validity = self.expect_sync().consensus.receive_block(block_struct).await;
+        if is_non_sync {
+            let block_validity = self.expect_sync().consensus.receive_block(block_struct).await;
 
-        if block_validity && is_block_new {
-            if previous_block_hash == canon.hash && self.state() == State::Mining {
-                self.terminator.store(true, Ordering::SeqCst);
+            if block_validity {
+                if previous_block_hash == canon.hash && self.state() == State::Mining {
+                    self.terminator.store(true, Ordering::SeqCst);
+                }
+
+                // This is a non-sync Block, send it to our peers.
+                self.propagate_block(block, height, remote_address);
             }
-
-            // This is a non-sync Block, send it to our peers.
-            self.propagate_block(block, height, remote_address);
+        } else if let Err(e) = self.expect_sync().consensus.shallow_receive_block(block_struct).await {
+            debug!("failed receiving sync block: {:?}", e);
         }
+
+        metrics::histogram!(metrics::blocks::INBOUND_PROCESSING_TIME, now.elapsed());
 
         Ok(())
     }
@@ -158,16 +167,21 @@ impl Node {
     pub(crate) async fn received_get_blocks(
         &self,
         remote_address: SocketAddr,
-        header_hashes: Vec<Digest>,
+        mut header_hashes: Vec<Digest>,
         time_received: Option<Instant>,
     ) -> Result<(), NetworkError> {
-        for (i, hash) in header_hashes
-            .into_iter()
-            .take(crate::MAX_BLOCK_SYNC_COUNT as usize)
-            .enumerate()
-        {
-            let block = self.storage.get_block(&hash).await?;
-            let height = match self.storage.get_block_state(&block.header.hash()).await? {
+        header_hashes.truncate(crate::MAX_BLOCK_SYNC_COUNT as usize);
+
+        let mut blocks = Vec::with_capacity(header_hashes.len());
+        for hash in &header_hashes {
+            let block = self.storage.get_block(hash).await?;
+            blocks.push(block);
+        }
+        let blocks: Vec<_> =
+            task::spawn_blocking(move || blocks.into_iter().map(|block| block.serialize()).collect()).await?;
+
+        for (i, (block, hash)) in blocks.into_iter().zip(header_hashes.into_iter()).enumerate() {
+            let height = match self.storage.get_block_state(&hash).await? {
                 BlockStatus::Committed(h) => Some(h as u32),
                 _ => None,
             };
@@ -181,11 +195,7 @@ impl Node {
 
             // Send a `SyncBlock` message to the connected peer.
             self.peer_book
-                .send_to(
-                    remote_address,
-                    Payload::SyncBlock(block.serialize(), height),
-                    time_received,
-                )
+                .send_to(remote_address, Payload::SyncBlock(block, height), time_received)
                 .await;
         }
 
@@ -199,14 +209,12 @@ impl Node {
         block_locator_hashes: Vec<Digest>,
         time_received: Option<Instant>,
     ) -> Result<(), NetworkError> {
+        let block_locator_hashes = block_locator_hashes.into_iter().map(|x| x.0.into()).collect::<Vec<_>>();
+
         let sync_hashes = self
             .storage
             .find_sync_blocks(&block_locator_hashes[..], crate::MAX_BLOCK_SYNC_COUNT as usize)
-            .await?
-            .into_iter()
-            .map(|x| x.bytes::<32>().map(BlockHeaderHash))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| anyhow!("invalid block header size in locator hash"))?;
+            .await?;
 
         // send a `Sync` message to the connected peer.
         self.peer_book
@@ -217,14 +225,13 @@ impl Node {
     }
 
     /// A peer has sent us their chain state.
-    pub(crate) async fn received_sync(&self, remote_address: SocketAddr, block_hashes: Vec<BlockHeaderHash>) {
+    pub(crate) async fn received_sync(&self, remote_address: SocketAddr, block_hashes: Vec<Digest>) {
         let sender = self.master_dispatch.read().await;
         if let Some(sender) = &*sender {
             sender
                 .send(SyncInbound::BlockHashes(remote_address, block_hashes))
                 .await
                 .ok();
-            metrics::increment_gauge!(snarkos_metrics::queues::SYNC_ITEMS, 1.0);
         }
     }
 }

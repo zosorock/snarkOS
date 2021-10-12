@@ -19,10 +19,9 @@ use std::{
     time::Duration,
 };
 
-use futures::{select, FutureExt};
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::{net::TcpStream, time::timeout};
 
-use snarkos_metrics::{self as metrics, connections::*};
+use snarkos_metrics::{self as metrics, connections::*, wrapped_mpsc};
 
 use crate::{NetworkError, Node, Peer, PeerEvent, PeerEventData, PeerHandle, Version};
 
@@ -31,12 +30,20 @@ use super::{network::PeerIOHandle, PeerAction};
 const CONNECTION_TIMEOUT_SECS: u64 = 3;
 
 impl Peer {
-    pub fn connect(mut self, node: Node, event_target: mpsc::Sender<PeerEvent>) {
-        let (sender, receiver) = mpsc::channel::<PeerAction>(64);
+    pub fn connect(mut self, node: Node, event_target: wrapped_mpsc::Sender<PeerEvent>) {
+        let (sender, receiver) = wrapped_mpsc::channel::<PeerAction>(snarkos_metrics::queues::PEER_EVENTS, 64);
         tokio::spawn(async move {
             self.set_connecting();
             match self.inner_connect(node.version()).await {
                 Err(e) => {
+                    self.quality.connect_failed();
+                    event_target
+                        .send(PeerEvent {
+                            address: self.address,
+                            data: PeerEventData::FailHandshake,
+                        })
+                        .await
+                        .ok();
                     self.fail();
                     if !e.is_trivial() {
                         error!(
@@ -49,35 +56,17 @@ impl Peer {
                             self.address, e
                         );
                     }
-
-                    // Marks the peer as unroutable if the connection fails. Currently matches
-                    // against all io errors which exclude a potential max peers limit breach.
-                    //
-                    // FIXME (nkls): refine this to be set for specific errors?
-                    //
-                    // TCP/IP error codes are different on Unix and on Windows and can't be
-                    // reliably matched with the current error kinds. Nightly recently saw the
-                    // addition of new error kinds that could be useful once stabilised:
-                    // https://github.com/rust-lang/rust/issues/86442.
-                    if let NetworkError::Io(_e) = e {
-                        self.set_routable(false);
-                    }
                 }
                 Ok(network) => {
                     self.set_connected();
-                    self.set_routable(true);
                     metrics::increment_gauge!(CONNECTED, 1.0);
                     event_target
                         .send(PeerEvent {
                             address: self.address,
-                            data: PeerEventData::Connected(PeerHandle {
-                                sender: sender.clone(),
-                                queued_outbound_message_count: self.queued_outbound_message_count.clone(),
-                            }),
+                            data: PeerEventData::Connected(PeerHandle { sender: sender.clone() }),
                         })
                         .await
                         .ok();
-                    metrics::increment_gauge!(snarkos_metrics::queues::PEER_EVENTS, 1.0);
 
                     if let Err(e) = self.run(node, network, receiver).await {
                         if !e.is_trivial() {
@@ -96,16 +85,14 @@ impl Peer {
                     metrics::decrement_gauge!(CONNECTED, 1.0);
                 }
             }
-            let state = self.status;
             self.set_disconnected();
             event_target
                 .send(PeerEvent {
                     address: self.address,
-                    data: PeerEventData::Disconnect(self, state),
+                    data: PeerEventData::Disconnect(Box::new(self)),
                 })
                 .await
                 .ok();
-            metrics::increment_gauge!(snarkos_metrics::queues::PEER_EVENTS, 1.0);
         });
     }
 
@@ -113,15 +100,17 @@ impl Peer {
         metrics::increment_gauge!(CONNECTING, 1.0);
         let _x = defer::defer(|| metrics::decrement_gauge!(CONNECTING, 1.0));
 
-        let tcp_stream;
-        select! {
-            stream = TcpStream::connect(self.address).fuse() => {
-                tcp_stream = stream?;
-            },
-            _ = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS)).fuse() => {
-                return Err(NetworkError::Io(IoError::new(ErrorKind::TimedOut, "connection timed out")));
-            },
+        match timeout(
+            Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+            TcpStream::connect(self.address),
+        )
+        .await
+        {
+            Ok(stream) => self.inner_handshake_initiator(stream?, our_version).await,
+            Err(_) => Err(NetworkError::Io(IoError::new(
+                ErrorKind::TimedOut,
+                "connection timed out",
+            ))),
         }
-        self.inner_handshake_initiator(tcp_stream, our_version).await
     }
 }

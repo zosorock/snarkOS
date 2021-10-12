@@ -63,12 +63,9 @@ pub const NOISE_BUF_LEN: usize = 65535;
 /// The spec-compliant size of the noise tag field.
 pub const NOISE_TAG_LEN: usize = 16;
 
-/// The maximum amount of time in which a handshake with a bootnode can conclude before dropping the
-/// connection; it should be no greater than the `peer_sync_interval`.
-pub const HANDSHAKE_BOOTNODE_TIMEOUT_SECS: u8 = 10;
 /// The maximum amount of time in which a handshake with a regular node can conclude before dropping the
 /// connection; it should be no greater than the `peer_sync_interval`.
-pub const HANDSHAKE_PEER_TIMEOUT_SECS: u8 = 5;
+pub const HANDSHAKE_TIMEOUT_SECS: u8 = 5;
 /// The amount of time after which a peer will be considered inactive an disconnected from if they have
 /// not sent any messages in the meantime.
 pub const MAX_PEER_INACTIVITY_SECS: u8 = 30;
@@ -78,16 +75,10 @@ pub const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024; // 8MiB
 /// The maximum number of peers shared at once in response to a `GetPeers` message.
 pub const SHARED_PEER_COUNT: usize = 25;
 
-/// The depth of the common inbound channel.
-pub const INBOUND_CHANNEL_DEPTH: usize = 16 * 1024;
-/// The depth of the per-connection outbound channels.
-pub const OUTBOUND_CHANNEL_DEPTH: usize = 1024;
+pub const BLOCK_CACHE_SIZE: usize = 64;
+pub const PEER_BLOCK_CACHE_SIZE: usize = 8;
 
 /// The version of the network protocol; it can be incremented in order to force users to update.
 /// FIXME: probably doesn't need to be a u64, could also be more informative than just a number
 // TODO (raychu86): Establish a formal node version.
 pub const PROTOCOL_VERSION: u64 = 2;
-
-pub(crate) type Sender = tokio::sync::mpsc::Sender<(Option<std::time::Instant>, Message)>;
-
-pub(crate) type Receiver = tokio::sync::mpsc::Receiver<(Option<std::time::Instant>, Message)>;

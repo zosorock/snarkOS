@@ -465,16 +465,14 @@ mod protected_rpc_tests {
         };
         let some_node = test_node(setup).await;
 
-        some_node
-            .connect_to_addresses(&[rpc_node.local_address().unwrap()])
-            .await;
+        some_node.connect_to_addresses(&[rpc_node.expect_local_addr()]).await;
 
         wait_until!(3, rpc_node.peer_book.get_connected_peer_count() == 1);
 
         let meta = authentication();
         let request = format!(
             "{{ \"jsonrpc\":\"2.0\", \"id\": 1, \"method\": \"disconnect\", \"params\": [\"{}\"] }}",
-            some_node.local_address().unwrap()
+            some_node.expect_local_addr()
         );
         let _response = rpc.handle_request(&request, meta).await.unwrap();
 
@@ -484,21 +482,22 @@ mod protected_rpc_tests {
     #[tokio::test]
     async fn test_rpc_connect() {
         let consensus = snarkos_testing::sync::create_test_consensus().await;
-        let setup = TestSetup {
+        let setup = || TestSetup {
             consensus_setup: None,
             ..Default::default()
         };
-        let (rpc, rpc_node) = initialize_test_rpc(&consensus, Some(setup.clone())).await;
+
+        let (rpc, rpc_node) = initialize_test_rpc(&consensus, Some(setup())).await;
         rpc_node.listen().await.unwrap();
 
-        let some_node1 = test_node(setup.clone()).await;
-        let some_node2 = test_node(setup).await;
+        let some_node1 = test_node(setup()).await;
+        let some_node2 = test_node(setup()).await;
 
         let meta = authentication();
         let request = format!(
             "{{ \"jsonrpc\":\"2.0\", \"id\": 1, \"method\": \"connect\", \"params\": [\"{}\", \"{}\"] }}",
-            some_node1.local_address().unwrap(),
-            some_node2.local_address().unwrap()
+            some_node1.expect_local_addr(),
+            some_node2.expect_local_addr()
         );
         let _response = rpc.handle_request(&request, meta).await.unwrap();
 

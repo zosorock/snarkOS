@@ -21,6 +21,8 @@ use jsonrpc_core::Metadata;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+use snarkos_network::{NodeCluster, NodeType};
+
 /// Defines the authentication format for accessing private endpoints on the RPC server
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RpcCredentials {
@@ -126,8 +128,8 @@ pub struct NodeInfo {
     /// The configured listening address of the node.
     pub listening_addr: SocketAddr,
 
-    /// Flag indicating if the node is a bootnode
-    pub is_bootnode: bool,
+    /// Flag indicating if the node's type.
+    pub node_type: NodeType,
 
     /// Flag indicating if the node is operating as a miner
     pub is_miner: bool,
@@ -140,6 +142,12 @@ pub struct NodeInfo {
 
     /// The version of the client binary.
     pub version: String,
+
+    /// The minimum desired number of connected peers.
+    pub min_peers: u16,
+
+    /// The maximum allowed number of connected peers.
+    pub max_peers: u16,
 }
 
 /// Returned value for the `getpeerinfo` rpc call
@@ -299,8 +307,10 @@ pub struct NetworkGraph {
     /// lowest.
     pub degree_centrality_delta: f64,
 
+    /// The potential height and members of the canon chain tip.
+    pub potential_tip: Option<NodeCluster>,
     /// The potential forks in the network and their member nodes.
-    pub potential_forks: Vec<PotentialFork>,
+    pub potential_forks: Vec<NodeCluster>,
 
     /// Known nodes.
     pub vertices: Vec<Vertice>,
@@ -308,28 +318,29 @@ pub struct NetworkGraph {
     pub edges: Vec<Edge>,
 }
 
-/// A potential fork in the network, maps height to members.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PotentialFork {
-    pub height: u32,
-    pub members: Vec<SocketAddr>,
-}
-
 /// Metadata and measurements pertaining to a node in the graph of the known network.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vertice {
+    /// The address of the node in the graph.
     pub addr: SocketAddr,
-    pub is_bootnode: bool,
+    /// Indicates whether the related node acts as a beacon.
+    pub is_beacon: bool,
+    /// Indicates whether the related node acts as a sync provider.
+    pub is_sync_provider: bool,
 
-    // Centrality measurements for the node.
+    /// The degree of network centrality applicable to the node.
     pub degree_centrality: u16,
+    /// The node's eigenvector centrality value in the network.
     pub eigenvector_centrality: f64,
+    /// The node's Fiedler value in the network.
     pub fiedler_value: f64,
 }
 
 /// A connection in the graph of the known network.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
+    /// The source of a graph's edge.
     pub source: SocketAddr,
+    /// The destination of a graph's edge.
     pub target: SocketAddr,
 }

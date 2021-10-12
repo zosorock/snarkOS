@@ -14,38 +14,41 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::Payload;
-
-use snarkvm_dpc::block::BlockHeader;
-
 use circular_queue::CircularQueue;
+use snarkvm_dpc::BlockHeader;
 use twox_hash::xxh3::hash64;
 
-pub struct Cache {
+#[derive(Debug, Clone)]
+pub struct Cache<const N: usize, const S: usize> {
     queue: CircularQueue<u64>,
 }
 
-impl Default for Cache {
+const BLOCK_HEADER_SIZE: usize = BlockHeader::size();
+
+pub type BlockCache<const N: usize> = Cache<N, BLOCK_HEADER_SIZE>;
+
+impl<const N: usize, const S: usize> Default for Cache<N, S> {
     fn default() -> Self {
         Self {
-            queue: CircularQueue::with_capacity(8 * 1024),
+            queue: CircularQueue::with_capacity(N),
         }
     }
 }
 
-impl Cache {
-    pub fn contains(&mut self, payload: &Payload) -> bool {
-        let hash = if let Payload::Block(bytes, _) = payload {
-            hash64(&bytes[..BlockHeader::size()])
-        } else {
-            unreachable!("Only blocks are cached for now");
-        };
+impl<const N: usize, const S: usize> Cache<N, S> {
+    fn hash_block(payload: &[u8]) -> u64 {
+        hash64(&payload[..S.min(payload.len())])
+    }
 
-        if self.queue.iter().any(|&e| e == hash) {
-            true
-        } else {
-            self.queue.push(hash);
-            false
-        }
+    pub fn contains(&self, payload: &[u8]) -> bool {
+        let hash = Self::hash_block(payload);
+
+        self.queue.iter().any(|&e| e == hash)
+    }
+
+    pub fn push(&mut self, payload: &[u8]) {
+        let hash = Self::hash_block(payload);
+
+        self.queue.push(hash);
     }
 }

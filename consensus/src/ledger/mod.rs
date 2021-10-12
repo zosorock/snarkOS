@@ -22,7 +22,6 @@ use std::{
 };
 
 use anyhow::*;
-use dyn_clone::DynClone;
 use smallvec::SmallVec;
 use snarkos_storage::Digest;
 use snarkvm_algorithms::{
@@ -38,6 +37,7 @@ use snarkvm_dpc::{
     TransactionScheme,
 };
 
+pub(crate) mod dummy;
 mod merkle;
 pub use merkle::MerkleLedger;
 mod indexed_merkle_tree;
@@ -48,13 +48,16 @@ pub use indexed_digests::IndexedDigests;
 use snarkvm_parameters::{LedgerMerkleTreeParameters, Parameter};
 use snarkvm_utilities::{FromBytes, ToBytes};
 
-pub trait Ledger: Send + Sync + DynClone {
+pub trait Ledger: Send + Sync {
     fn extend(
         &mut self,
         new_commitments: &[Digest],
         new_serial_numbers: &[Digest],
         new_memos: &[Digest],
     ) -> Result<Digest>;
+
+    /// Pushes raw ledger digests into the ledger -- used when committing multiple blocks at a time
+    fn push_interim_digests(&mut self, new_ledger_digests: &[Digest]) -> Result<()>;
 
     fn rollback(&mut self, commitments: &[Digest], serial_numbers: &[Digest], memos: &[Digest]) -> Result<()>;
 
@@ -78,13 +81,15 @@ pub trait Ledger: Send + Sync + DynClone {
 
     /// checks if a ledgers state is consistent
     fn validate_ledger(&self) -> bool;
+
+    fn requires_async_task(&self, new_commitments_len: usize, new_serial_numbers_len: usize) -> bool;
 }
 
 pub struct DynLedger(pub Box<dyn Ledger>);
 
-impl Clone for DynLedger {
-    fn clone(&self) -> Self {
-        DynLedger(dyn_clone::clone_box(&*self.0))
+impl DynLedger {
+    pub fn dummy() -> Self {
+        Self(Box::new(dummy::DummyLedger))
     }
 }
 

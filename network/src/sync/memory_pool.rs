@@ -46,10 +46,10 @@ impl Node {
     ) {
         debug!("Propagating a memory pool transaction to connected peers");
 
-        let local_address = self.local_address().unwrap();
+        let local_addr = self.expect_local_addr();
 
         for remote_address in self.connected_peers() {
-            if remote_address != transaction_sender && remote_address != local_address {
+            if remote_address != transaction_sender && remote_address != local_addr {
                 // Send a `Transaction` message to the connected peer.
                 self.peer_book
                     .send_to(remote_address, Payload::Transaction(transaction_bytes.clone()), None)
@@ -67,13 +67,13 @@ impl Node {
         source: SocketAddr,
         transaction: Vec<u8>,
     ) -> Result<()> {
-        if let Ok(tx) = Testnet1Transaction::read_le(&*transaction) {
-            let inserted = self.expect_sync().consensus.receive_transaction(tx.serialize()?).await;
+        let tx = Testnet1Transaction::read_le(&*transaction)?;
 
-            if inserted {
-                info!("Transaction added to memory pool.");
-                self.propagate_memory_pool_transaction(transaction, source).await;
-            }
+        let inserted = self.expect_sync().consensus.receive_transaction(tx.serialize()?).await;
+
+        if inserted {
+            info!("Transaction added to memory pool.");
+            self.propagate_memory_pool_transaction(transaction, source).await;
         }
 
         Ok(())

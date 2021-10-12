@@ -14,6 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
+use snarkos_metrics::wrapped_mpsc;
+
 use crate::consensus::ConsensusMessageWrapped;
 
 use super::*;
@@ -23,60 +25,31 @@ impl ConsensusInner {
     async fn init(&mut self) -> Result<()> {
         let canon = self.storage.canon().await?;
         // no blocks present/genesis situation
-        if canon.block_height == 0 && canon.hash.is_empty() {
+        if canon.is_empty() {
             // no blocks
             let hash = self.public.genesis_block.header.hash();
             let block = self.public.genesis_block.clone();
             self.storage.insert_block(&block).await?;
 
-            let init_digest = self.ledger.extend(&[], &[], &[])?;
-            self.storage.store_init_digest(init_digest).await?;
-
             self.commit_block(&hash, &block).await?;
         }
 
-        // scan for forks
-        let forks = self.scan_forks().await?;
-        for (canon, fork_child) in forks {
-            let canon_height = match self.storage.get_block_state(&canon).await? {
-                BlockStatus::Committed(n) => n,
-                _ => continue,
-            };
-            let fork_blocks = self.storage.longest_child_path(&fork_child).await?;
-            debug!(
-                "fork detected @ {}/{} -- starts at {}, goes for {} blocks, ending at {}",
-                canon_height,
-                canon,
-                fork_child,
-                fork_blocks.len(),
-                fork_blocks.last().unwrap()
-            );
-        }
-
-        if let Err(e) = self.try_to_fast_forward().await {
-            match e {
-                ConsensusError::InvalidBlock(e) => debug!("invalid block in initial fast-forward: {}", e),
-                e => warn!("failed to perform initial fast-forward: {:?}", e),
-            }
-        };
-        info!("fastforwarding complete");
         Ok(())
     }
 
-    pub(in crate::consensus) async fn agent(mut self, mut receiver: mpsc::Receiver<ConsensusMessageWrapped>) {
+    pub(in crate::consensus) async fn agent(mut self, mut receiver: wrapped_mpsc::Receiver<ConsensusMessageWrapped>) {
         self.init()
             .await
             .expect("failed to initialize ledger & storage with genesis block");
 
         while let Some((message, response)) = receiver.recv().await {
-            metrics::decrement_gauge!(snarkos_metrics::queues::CONSENSUS, 1.0);
-
             match message {
                 ConsensusMessage::ReceiveTransaction(transaction) => {
-                    response.send(Box::new(self.receive_transaction(transaction))).ok();
+                    let ret = self.receive_transaction(transaction).await;
+                    response.send(Box::new(ret)).ok();
                 }
                 ConsensusMessage::VerifyTransactions(transactions) => {
-                    let out = match self.verify_transactions(transactions.iter()) {
+                    let out = match self.verify_transactions(transactions).await {
                         Ok(out) => out,
                         Err(e) => {
                             error!(
@@ -98,7 +71,7 @@ impl ConsensusInner {
                                 debug!("failed receiving block: {:?}", e);
                             }
                             e => {
-                                warn!("failed receiving block: {:?}", e);
+                                debug!("failed receiving block: {:?}", e);
                             }
                         }
                         response.send(Box::new(false)).ok();
@@ -110,11 +83,11 @@ impl ConsensusInner {
                     response.send(Box::new(out)).ok();
                 }
                 ConsensusMessage::CreateTransaction(request) => {
-                    let out = self.create_transaction(*request);
+                    let out = self.create_transaction(*request).await;
                     response.send(Box::new(out)).ok();
                 }
                 ConsensusMessage::CreatePartialTransaction(request) => {
-                    let out = self.create_partial_transaction(request);
+                    let out = self.create_partial_transaction(request).await;
                     response.send(Box::new(out)).ok();
                 }
                 ConsensusMessage::ForceDecommit(hash) => {
@@ -125,11 +98,18 @@ impl ConsensusInner {
                     let out = self.try_to_fast_forward().await;
                     response.send(Box::new(out)).ok();
                 }
-                ConsensusMessage::ScanForks() => {
-                    response.send(Box::new(self.scan_forks().await)).ok();
-                }
-                ConsensusMessage::RecommitCanon() => {
-                    response.send(Box::new(self.recommit_canon().await)).ok();
+                #[cfg(feature = "test")]
+                ConsensusMessage::Reset() => {
+                    response
+                        .send(Box::new(
+                            async {
+                                self.ledger.clear();
+                                self.storage.reset().await?;
+                                self.init().await
+                            }
+                            .await,
+                        ))
+                        .ok();
                 }
             }
         }

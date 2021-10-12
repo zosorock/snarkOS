@@ -1,6 +1,6 @@
 [package]
 name = "snarkos"
-version = "1.3.14"
+version = "1.3.16"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A decentralized operating system"
 homepage = "https://aleo.org"
@@ -18,10 +18,12 @@ include = [
   "snarkos",
   "README.md",
   "LICENSE.md",
-  "build.rs"
+  "build.rs",
+  "bin/"
 ]
 license = "GPL-3.0"
 edition = "2018"
+default-run = "snarkos"
 
 [workspace]
 members = [
@@ -41,7 +43,19 @@ path = "snarkos/lib.rs"
 
 [[bin]]
 name = "snarkos"
-path = "snarkos/main.rs"
+path = "bin/snarkos.rs"
+
+[[bin]]
+name = "crawler"
+path = "bin/crawler.rs"
+
+[[bin]]
+name = "beacon"
+path = "bin/beacon.rs"
+
+[[bin]]
+name = "sync_provider"
+path = "bin/sync_provider.rs"
 
 [dependencies.snarkvm-algorithms]
 version = "=0.7.9"
@@ -61,20 +75,20 @@ version = "=0.7.9"
 
 [dependencies.snarkos-consensus]
 path = "./consensus"
-version = "1.3.14"
+version = "1.3.16"
 
 [dependencies.snarkos-network]
 path = "./network"
-version = "1.3.14"
+version = "1.3.16"
 
 [dependencies.snarkos-rpc]
 path = "./rpc"
-version = "1.3.14"
+version = "1.3.16"
 
 [dependencies.snarkos-storage]
 path = "./storage"
 features = [ "rocksdb_storage" ]
-version = "1.3.14"
+version = "1.3.16"
 
 [dependencies.anyhow]
 version = "1.0"
@@ -86,10 +100,13 @@ version = "2.33.3"
 version = "2.0"
 
 [dependencies.dirs]
-version = "3.0.2"
+version = "4.0"
 
 [dependencies.hex]
 version = "0.4.1"
+
+[dependencies.num_cpus]
+version = "1"
 
 [dependencies.parking_lot]
 version = "0.11.1"
@@ -125,14 +142,8 @@ default-features = false
 features = [ "log" ]
 version = "0.1"
 
-[dependencies.tracing-futures]
-version = "0.2"
-
 [dependencies.tracing-subscriber]
 version = "0.2"
-
-[dev-dependencies.rusty-hook]
-version = "0.11.2"
 
 [build-dependencies.capnpc]
 version = "0.14"
@@ -143,6 +154,7 @@ default = [ ]
 prometheus = [ "snarkos-network/prometheus" ]
 compile_capnp_schema = [ "capnpc" ]
 noconfig = [ ]
+cuda = [ "snarkvm-algorithms/cuda" ]
 
 [profile.release]
 opt-level = 3

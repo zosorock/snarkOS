@@ -16,19 +16,24 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::net::TcpStream;
 
-use snarkos_metrics::{self as metrics, connections::*};
+use snarkos_metrics::{self as metrics, connections::*, wrapped_mpsc};
 
-use crate::{NetworkError, Node, Peer, PeerEvent, PeerEventData, PeerHandle, PeerStatus, Version};
+use crate::{NetworkError, Node, Peer, PeerEvent, PeerEventData, PeerHandle, Version};
 
 use super::{network::PeerIOHandle, PeerAction};
 
 impl Peer {
-    pub fn receive(remote_address: SocketAddr, node: Node, stream: TcpStream, event_target: mpsc::Sender<PeerEvent>) {
-        let (sender, receiver) = mpsc::channel::<PeerAction>(64);
+    pub fn receive(
+        remote_address: SocketAddr,
+        node: Node,
+        stream: TcpStream,
+        event_target: wrapped_mpsc::Sender<PeerEvent>,
+    ) {
+        let (sender, receiver) = wrapped_mpsc::channel::<PeerAction>(metrics::queues::OUTBOUND, 64);
         tokio::spawn(async move {
-            let (mut peer, network) = match Peer::inner_receive(remote_address, stream, node.version()).await {
+            let (peer, network) = match Peer::inner_receive(remote_address, stream, node.version()).await {
                 Err(e) => {
                     error!(
                         "failed to receive incoming connection from peer '{}': '{:?}'",
@@ -41,25 +46,22 @@ impl Peer {
                         })
                         .await
                         .ok();
-                    metrics::increment_gauge!(snarkos_metrics::queues::PEER_EVENTS, 1.0);
                     return;
                 }
                 Ok(x) => x,
             };
+
+            let mut peer = node.peer_book.fetch_received_peer_data(peer.address).await;
 
             peer.set_connected();
             metrics::increment_gauge!(CONNECTED, 1.0);
             event_target
                 .send(PeerEvent {
                     address: peer.address,
-                    data: PeerEventData::Connected(PeerHandle {
-                        sender: sender.clone(),
-                        queued_outbound_message_count: peer.queued_outbound_message_count.clone(),
-                    }),
+                    data: PeerEventData::Connected(PeerHandle { sender: sender.clone() }),
                 })
                 .await
                 .ok();
-            metrics::increment_gauge!(snarkos_metrics::queues::PEER_EVENTS, 1.0);
 
             if let Err(e) = peer.run(node, network, receiver).await {
                 if !e.is_trivial() {
@@ -80,11 +82,10 @@ impl Peer {
             event_target
                 .send(PeerEvent {
                     address: peer.address,
-                    data: PeerEventData::Disconnect(peer, PeerStatus::Connected),
+                    data: PeerEventData::Disconnect(Box::new(peer)),
                 })
                 .await
                 .ok();
-            metrics::increment_gauge!(snarkos_metrics::queues::PEER_EVENTS, 1.0);
         });
     }
 

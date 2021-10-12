@@ -16,67 +16,58 @@
 
 use anyhow::*;
 use chrono::Utc;
-use futures::{select, FutureExt};
 use serde::{Deserialize, Serialize};
+use snarkos_metrics::wrapped_mpsc;
 use std::{
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
 
 use super::PeerQuality;
-use crate::{message::Payload, NetworkError, Node};
+use crate::{message::Payload, BlockCache, NetworkError, Node};
 
 use super::{network::*, outbound_handler::*};
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-pub enum PeerStatus {
-    Connected,
-    Connecting,
-    Disconnected,
-}
-
-impl Default for PeerStatus {
-    fn default() -> Self {
-        PeerStatus::Disconnected
-    }
-}
-
 /// A data structure containing information about a peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub address: SocketAddr,
-    #[serde(skip)]
-    pub status: PeerStatus,
     pub quality: PeerQuality,
-    pub is_bootnode: bool,
+
     #[serde(skip)]
-    pub queued_outbound_message_count: Arc<AtomicUsize>,
-    /// Whether this peer is routable or not.
-    ///
-    /// `None` indicates the node has never attempted a connection with this peer.
-    pub is_routable: Option<bool>,
+    pub block_received_cache: BlockCache<{ crate::PEER_BLOCK_CACHE_SIZE }>,
 }
 
 const FAILURE_EXPIRY_TIME: Duration = Duration::from_secs(15 * 60);
 const FAILURE_THRESHOLD: usize = 5;
 
 impl Peer {
-    pub fn new(address: SocketAddr, is_bootnode: bool) -> Self {
+    pub fn new(address: SocketAddr, data: Option<&snarkos_storage::Peer>) -> Self {
+        let mut quality: PeerQuality = Default::default();
+        if let Some(data) = data {
+            quality.sync_from_storage(data);
+        }
         Self {
             address,
-            status: PeerStatus::Disconnected,
-            quality: Default::default(),
-            is_bootnode,
-            queued_outbound_message_count: Default::default(),
+            quality,
 
-            // Set to `None` since peer creation only ever happens before a connection to the peer,
-            // therefore we don't know if its listener is routable or not.
-            is_routable: None,
+            block_received_cache: BlockCache::default(),
+        }
+    }
+
+    pub fn serialize(&self) -> snarkos_storage::Peer {
+        snarkos_storage::Peer {
+            address: self.address,
+            block_height: self.quality.block_height,
+            first_seen: self.quality.first_seen,
+            last_seen: self.quality.last_seen,
+            last_connected: self.quality.last_connected,
+            blocks_synced_to: self.quality.blocks_synced_to,
+            blocks_synced_from: self.quality.blocks_synced_from,
+            blocks_received_from: self.quality.blocks_received_from,
+            blocks_sent_to: self.quality.blocks_sent_to,
+            connection_attempt_count: self.quality.connection_attempt_count,
+            connection_success_count: self.quality.connected_count,
+            connection_transient_fail_count: self.quality.connection_transient_fail_count,
         }
     }
 
@@ -108,27 +99,17 @@ impl Peer {
         self.quality.failures.len()
     }
 
-    pub fn handshake_timeout(&self) -> Duration {
-        if self.is_bootnode {
-            Duration::from_secs(crate::HANDSHAKE_BOOTNODE_TIMEOUT_SECS as u64)
-        } else {
-            Self::peer_handshake_timeout()
-        }
-    }
-
-    pub fn peer_handshake_timeout() -> Duration {
-        Duration::from_secs(crate::HANDSHAKE_PEER_TIMEOUT_SECS as u64)
-    }
-
     pub(super) async fn run(
         &mut self,
         node: Node,
         mut network: PeerIOHandle,
-        mut receiver: mpsc::Receiver<PeerAction>,
+        mut receiver: wrapped_mpsc::Receiver<PeerAction>,
     ) -> Result<(), NetworkError> {
         let mut reader = network.take_reader();
 
-        let (sender, mut read_receiver) = mpsc::channel::<Result<Vec<u8>, NetworkError>>(8);
+        let (sender, mut read_receiver) =
+            wrapped_mpsc::channel::<Result<Vec<u8>, NetworkError>>(snarkos_metrics::queues::INBOUND, 8);
+
         tokio::spawn(async move {
             loop {
                 if sender
@@ -142,8 +123,10 @@ impl Peer {
         });
 
         loop {
-            select! {
-                message = receiver.recv().fuse() => {
+            tokio::select! {
+                biased;
+
+                message = receiver.recv() => {
                     if message.is_none() {
                         break;
                     }
@@ -153,10 +136,11 @@ impl Peer {
                         PeerResponse::None => (),
                     }
                 },
-                data = read_receiver.recv().fuse() => {
+                data = read_receiver.recv() => {
                     if data.is_none() {
                         break;
                     }
+
                     let data = match data.unwrap() {
                         // decrypt
                         Ok(data) => network.read_payload(&data[..]),
@@ -178,28 +162,19 @@ impl Peer {
             }
         }
 
-        let queued_outbound_message_count = self.queued_outbound_message_count.swap(0, Ordering::SeqCst);
-        metrics::decrement_gauge!(snarkos_metrics::queues::OUTBOUND, queued_outbound_message_count as f64);
-
         Ok(())
     }
 
     pub(super) fn set_connected(&mut self) {
         self.quality.connected();
-        self.status = PeerStatus::Connected;
     }
 
     pub(super) fn set_connecting(&mut self) {
         self.quality.see();
-        self.status = PeerStatus::Connecting;
+        self.quality.connecting();
     }
 
     pub(super) fn set_disconnected(&mut self) {
         self.quality.disconnected();
-        self.status = PeerStatus::Disconnected;
-    }
-
-    pub(super) fn set_routable(&mut self, is_routable: bool) {
-        self.is_routable = Some(is_routable)
     }
 }

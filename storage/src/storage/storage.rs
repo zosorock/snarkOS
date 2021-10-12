@@ -15,13 +15,15 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::*;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 #[cfg(feature = "test")]
 use crate::key_value::KeyValueColumn;
 use crate::{
     Digest,
+    DigestTree,
     FixMode,
+    Peer,
     SerialBlock,
     SerialBlockHeader,
     SerialRecord,
@@ -57,11 +59,18 @@ pub enum ForkDescription {
     Orphan,
 }
 
+#[derive(Debug)]
 pub struct CanonData {
     /// Current block height of canon
     pub block_height: usize,
     /// Current hash of canon block
     pub hash: Digest,
+}
+
+impl CanonData {
+    pub fn is_empty(&self) -> bool {
+        self.block_height == 0 && self.hash.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +118,12 @@ pub trait Storage: Send + Sync {
     /// Commits a block into canon.
     async fn commit_block(&self, hash: &Digest, digest: Digest) -> Result<BlockStatus>;
 
+    /// Attempts to recommit a block and its longest descendent chains blocks into canon, until there are no more ledger digests.
+    async fn recommit_blockchain(&self, hash: &Digest) -> Result<()>;
+
+    /// Attempts to recommit a block into canon if it has a ledger digest.
+    async fn recommit_block(&self, hash: &Digest) -> Result<BlockStatus>;
+
     /// Decommits a block and all descendent blocks, returning them in ascending order
     async fn decommit_blocks(&self, hash: &Digest) -> Result<Vec<SerialBlock>>;
 
@@ -117,6 +132,9 @@ pub trait Storage: Send + Sync {
 
     /// Gets the longest, committed or uncommitted, chain of blocks originating from `block_hash`, including `block_hash`.
     async fn longest_child_path(&self, block_hash: &Digest) -> Result<Vec<Digest>>;
+
+    /// Gets a tree structure representing all the descendents of [`block_hash`]
+    async fn get_block_digest_tree(&self, block_hash: &Digest) -> Result<DigestTree>;
 
     /// Gets the immediate children of `block_hash`.
     async fn get_block_children(&self, block_hash: &Digest) -> Result<Vec<Digest>>;
@@ -127,6 +145,9 @@ pub trait Storage: Send + Sync {
         points_of_interest: Vec<Digest>,
         oldest_fork_threshold: usize,
     ) -> Result<Vec<Digest>>;
+
+    /// scans uncommitted blocks with a known path to the canon chain for forks
+    async fn scan_forks(&self, scan_depth: u32) -> Result<Vec<(Digest, Digest)>>;
 
     /// Find hashes to provide for a syncing node given `block_locator_hashes`.
     async fn find_sync_blocks(&self, block_locator_hashes: &[Digest], block_count: usize) -> Result<Vec<Digest>>;
@@ -148,9 +169,6 @@ pub trait Storage: Send + Sync {
         }
     }
 
-    /// Stores the "pre-genesis" digest; only applicable to the genesis block txs.
-    async fn store_init_digest(&self, digest: Digest) -> Result<()>;
-
     // miner convenience record management functions
 
     /// Gets a list of stored record commitments subject to `limit`.
@@ -163,16 +181,16 @@ pub trait Storage: Send + Sync {
     async fn store_records(&self, records: &[SerialRecord]) -> Result<()>;
 
     /// Gets all known commitments for canon chain in block-number ascending order
-    async fn get_commitments(&self) -> Result<Vec<Digest>>;
+    async fn get_commitments(&self, block_start: u32) -> Result<Vec<Digest>>;
 
     /// Gets all known serial numbers for canon chain in block-number ascending order
-    async fn get_serial_numbers(&self) -> Result<Vec<Digest>>;
+    async fn get_serial_numbers(&self, block_start: u32) -> Result<Vec<Digest>>;
 
     /// Gets all known memos for canon chain in block-number ascending order
-    async fn get_memos(&self) -> Result<Vec<Digest>>;
+    async fn get_memos(&self, block_start: u32) -> Result<Vec<Digest>>;
 
     /// Gets all known ledger digests for canon chain in block-number ascending order
-    async fn get_ledger_digests(&self) -> Result<Vec<Digest>>;
+    async fn get_ledger_digests(&self, block_start: u32) -> Result<Vec<Digest>>;
 
     /// Resets stored ledger state. A maintenance function, not intended for general use.
     async fn reset_ledger(
@@ -189,6 +207,15 @@ pub trait Storage: Send + Sync {
     /// Similar to `Storage::get_canon_blocks`, gets hashes of all blocks subject to `filter` and `limit` in filter-defined order. A maintenance function, not intended for general use.
     async fn get_block_hashes(&self, limit: Option<u32>, filter: BlockFilter) -> Result<Vec<Digest>>;
 
+    /// Stores or updates a collection of [`Peer`]s
+    async fn store_peers(&self, peers: Vec<Peer>) -> Result<()>;
+
+    /// Looks up a series of [`Peer`]s based on socket address.
+    async fn lookup_peers(&self, addresses: Vec<SocketAddr>) -> Result<Vec<Option<Peer>>>;
+
+    /// Looks up all known [`Peer`]s.
+    async fn fetch_peers(&self) -> Result<Vec<Peer>>;
+
     /// Performs low-level storage validation; it's mostly intended for test purposes, as there is a lower level `KeyValueStorage` interface available outside of them.
     async fn validate(&self, limit: Option<u32>, fix_mode: FixMode) -> Vec<ValidatorError>;
 
@@ -199,6 +226,12 @@ pub trait Storage: Send + Sync {
     /// Removes the given key and its corresponding value from the given column.
     #[cfg(feature = "test")]
     async fn delete_item(&self, col: KeyValueColumn, key: Vec<u8>) -> Result<()>;
+
+    #[cfg(feature = "test")]
+    async fn reset(&self) -> Result<()>;
+
+    /// Removes non-canon blocks and transactions from the storage.
+    async fn trim(&self) -> Result<()>;
 }
 
 /// A wrapper over storage implementations

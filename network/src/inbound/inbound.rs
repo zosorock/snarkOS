@@ -14,57 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tokio::{
-    net::TcpListener,
-    sync::{mpsc::error::TrySendError, Mutex},
-    task,
-};
+use tokio::{net::TcpListener, task};
 
-use snarkos_metrics::{self as metrics, connections, inbound, queues};
+use snarkos_metrics::{self as metrics, connections};
 
-use crate::{errors::NetworkError, message::*, Node, Receiver, Sender};
-
-/// A stateless component for handling inbound network traffic.
-#[derive(Debug)]
-pub struct Inbound {
-    /// The producer for sending inbound messages to the server.
-    pub(crate) sender: Sender,
-    /// The consumer for receiving inbound messages to the server.
-    receiver: Mutex<Option<Receiver>>,
-}
-
-impl Default for Inbound {
-    fn default() -> Self {
-        // Initialize the sender and receiver.
-        let (sender, receiver) = tokio::sync::mpsc::channel(crate::INBOUND_CHANNEL_DEPTH);
-
-        Self {
-            sender,
-            receiver: Mutex::new(Some(receiver)),
-        }
-    }
-}
-
-impl Inbound {
-    #[inline]
-    pub(crate) async fn take_receiver(&self) -> Receiver {
-        self.receiver
-            .lock()
-            .await
-            .take()
-            .expect("The Inbound Receiver had already been taken!")
-    }
-}
+use crate::{errors::NetworkError, Node};
 
 impl Node {
     /// This method handles new inbound connection requests.
     pub async fn listen(&self) -> Result<(), NetworkError> {
         let listener = TcpListener::bind(&self.config.desired_address).await?;
-        let own_listener_address = listener.local_addr()?;
 
-        self.set_local_address(own_listener_address);
+        // Update the node's listening address.
+        let own_listener_address = listener.local_addr()?;
+        self.set_local_addr(own_listener_address);
+
         info!("Initializing listener for node ({:x})", self.id);
 
         let node_clone = self.clone();
@@ -102,137 +68,5 @@ impl Node {
         self.register_task(listener_handle);
 
         Ok(())
-    }
-
-    pub async fn process_incoming_messages(&self, receiver: &mut Receiver) -> Result<(), NetworkError> {
-        let (time_received, Message { direction, payload }) =
-            receiver.recv().await.ok_or(NetworkError::ReceiverFailedToParse)?;
-
-        metrics::decrement_gauge!(queues::INBOUND, 1.0);
-
-        let source = if let Direction::Inbound(addr) = direction {
-            addr
-        } else {
-            unreachable!("All messages processed sent to the inbound receiver are Inbound");
-        };
-
-        match payload {
-            Payload::Transaction(transaction) => {
-                metrics::increment_counter!(inbound::TRANSACTIONS);
-
-                if self.sync().is_some() {
-                    self.received_memory_pool_transaction(source, transaction).await?;
-                }
-            }
-            Payload::Block(block, height) => {
-                // The BLOCKS metric was already updated during the block dedup cache lookup.
-
-                if self.sync().is_some() {
-                    self.received_block(source, block, height, true).await?;
-                }
-            }
-            Payload::SyncBlock(block, height) => {
-                metrics::increment_counter!(inbound::SYNCBLOCKS);
-
-                if self.sync().is_some() {
-                    self.received_block(source, block, height, false).await?;
-
-                    // Update the peer and possibly finish the sync process.
-                    if let Some(peer) = self.peer_book.get_peer_handle(source) {
-                        peer.got_sync_block().await;
-                    }
-                }
-            }
-            Payload::GetBlocks(hashes) => {
-                metrics::increment_counter!(inbound::GETBLOCKS);
-
-                if self.sync().is_some() {
-                    let hashes = hashes.into_iter().map(|x| x.0.into()).collect();
-
-                    let node_clone = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = node_clone.received_get_blocks(source, hashes, time_received).await {
-                            warn!("failed to send sync blocks to peer: {:?}", e);
-                        }
-                    });
-                }
-            }
-            Payload::GetMemoryPool => {
-                metrics::increment_counter!(inbound::GETMEMORYPOOL);
-
-                if self.sync().is_some() {
-                    self.received_get_memory_pool(source, time_received).await?;
-                }
-            }
-            Payload::MemoryPool(mempool) => {
-                metrics::increment_counter!(inbound::MEMORYPOOL);
-
-                if self.sync().is_some() {
-                    self.received_memory_pool(mempool).await?;
-                }
-            }
-            Payload::GetSync(getsync) => {
-                metrics::increment_counter!(inbound::GETSYNC);
-
-                if self.sync().is_some() {
-                    let getsync = getsync.into_iter().map(|x| x.0.into()).collect();
-                    self.received_get_sync(source, getsync, time_received).await?;
-                }
-            }
-            Payload::Sync(sync) => {
-                metrics::increment_counter!(inbound::SYNCS);
-
-                if self.sync().is_some() {
-                    if sync.is_empty() {
-                        // An empty `Sync` is unexpected, as `GetSync` requests are only
-                        // sent to peers that declare a greater block height.
-                        warn!("{} doesn't have sync blocks to share", source);
-                        if let Some(peer) = self.peer_book.get_peer_handle(source) {
-                            peer.fail().await;
-                        }
-                    } else {
-                        trace!("Received {} sync block hashes from {}", sync.len(), source);
-                        self.received_sync(source, sync).await;
-                    }
-                }
-            }
-            Payload::GetPeers => {
-                metrics::increment_counter!(inbound::GETPEERS);
-
-                self.send_peers(source, time_received).await;
-            }
-            Payload::Peers(peers) => {
-                metrics::increment_counter!(inbound::PEERS);
-
-                self.process_inbound_peers(source, peers).await;
-            }
-            Payload::Ping(_) | Payload::Pong => {
-                // Skip as this case is already handled with priority in inbound_handler
-                unreachable!()
-            }
-            Payload::Unknown => {
-                metrics::increment_counter!(inbound::UNKNOWN);
-                warn!("Unknown payload received; this could indicate that the client you're using is out-of-date");
-            }
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    pub(crate) fn route(&self, time_received: Option<Instant>, response: Message) {
-        match self.inbound.sender.try_send((time_received, response)) {
-            Err(TrySendError::Full((_, msg))) => {
-                metrics::increment_counter!(inbound::ALL_FAILURES);
-                error!("Failed to route a {}: the inbound channel is full", msg);
-            }
-            Err(TrySendError::Closed((_, msg))) => {
-                // TODO: this shouldn't happen, but is critical if it does
-                error!("Failed to route a {}: the inbound channel is closed", msg);
-            }
-            Ok(_) => {
-                metrics::increment_gauge!(queues::INBOUND, 1.0);
-            }
-        }
     }
 }

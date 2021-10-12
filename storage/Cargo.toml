@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-storage"
-version = "1.3.14"
+version = "1.3.16"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Storage for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -18,10 +18,19 @@ license = "GPL-3.0"
 edition = "2018"
 
 [features]
-default = [ "rocksdb_storage" ]
+default = [ "rocksdb_storage", "sqlite_storage" ]
 rocksdb_storage = [ "rocksdb" ]
+sqlite_storage = [ "rusqlite" ]
 mem_storage = [ ]
 test = [ ]
+
+[dependencies.rusqlite]
+version = "0.26"
+optional = true
+features = [ "bundled" ]
+
+[dependencies.metrics]
+version = "0.17"
 
 [dependencies.snarkvm-algorithms]
 version = "=0.7.9"
@@ -29,18 +38,16 @@ version = "=0.7.9"
 [dependencies.snarkvm-dpc]
 version = "=0.7.9"
 
-[dependencies.snarkvm-parameters]
-version = "=0.7.9"
-
 [dependencies.snarkvm-utilities]
 version = "=0.7.9"
 
 [dependencies.snarkos-metrics]
 path = "../metrics"
+version = "1.3.16"
 
-[dependencies.snarkos-parameters]
-path = "../parameters"
-version = "1.3.14"
+[dependencies.chrono]
+version = "0.4"
+features = [ "serde" ]
 
 [dependencies.derivative]
 version = "2.2.0"
@@ -49,7 +56,7 @@ version = "2.2.0"
 version = "0.9"
 
 [dependencies.smallvec]
-version = "1.6"
+version = "1.7"
 features = [ "write" ]
 
 [dependencies.anyhow]
@@ -57,6 +64,9 @@ version = "1.0.40"
 
 [dependencies.bincode]
 version = "1.3.1"
+
+[dependencies.hash_hasher]
+version = "2"
 
 [dependencies.hex]
 version = "0.4.2"

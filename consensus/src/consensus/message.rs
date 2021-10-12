@@ -46,8 +46,8 @@ pub(super) enum ConsensusMessage {
     CreatePartialTransaction(CreatePartialTransactionRequest),
     ForceDecommit(Vec<u8>),
     FastForward(),
-    ScanForks(),
-    RecommitCanon(),
+    #[cfg(feature = "test")]
+    Reset(),
 }
 
 pub(super) type ConsensusMessageWrapped = (ConsensusMessage, oneshot::Sender<Box<dyn Any + Send + Sync>>);

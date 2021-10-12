@@ -19,7 +19,6 @@
 //! See [RpcFunctions](../trait.RpcFunctions.html) for documentation of public endpoints.
 
 use crate::{error::RpcError, rpc_trait::RpcFunctions, rpc_types::*};
-use futures::Future;
 use jsonrpc_core::{IoDelegate, MetaIoHandler, Params, Value};
 use serde::{de::DeserializeOwned, Serialize};
 use snarkos_consensus::{get_block_reward, ConsensusParameters};
@@ -35,6 +34,7 @@ use snarkvm_utilities::{
     to_bytes_le,
     CanonicalSerialize,
 };
+use std::future::Future;
 
 use chrono::Utc;
 
@@ -42,8 +42,7 @@ use std::{ops::Deref, sync::Arc};
 
 type JsonRPCError = jsonrpc_core::Error;
 
-/// Implements JSON-RPC HTTP endpoint functions for a node.
-/// The constructor is given Arc::clone() copies of all needed node components.
+/// Implements RPC HTTP endpoint functions for a node.
 #[derive(Clone)]
 pub struct RpcImpl(Arc<RpcInner>);
 
@@ -55,6 +54,7 @@ impl Deref for RpcImpl {
     }
 }
 
+#[doc(hidden)]
 pub struct RpcInner {
     /// Blockchain database storage.
     pub(crate) storage: DynStorage,
@@ -76,22 +76,27 @@ impl RpcImpl {
         }))
     }
 
+    /// Returns a reference to the node's sync handler.
     pub fn sync_handler(&self) -> Result<&Arc<Sync>, RpcError> {
         self.node.sync().ok_or(RpcError::NoConsensus)
     }
 
+    /// Returns a reference to the node's consensus parameters.
     pub fn consensus_parameters(&self) -> Result<&ConsensusParameters, RpcError> {
         Ok(&self.sync_handler()?.consensus.parameters)
     }
 
+    /// Returns a reference to the node's DPC object.
     pub fn dpc(&self) -> Result<&Testnet1DPC, RpcError> {
         Ok(&self.sync_handler()?.consensus.dpc)
     }
 
+    /// Returns a reference to the node's `KnownNetwork` object.
     pub fn known_network(&self) -> Result<&KnownNetwork, RpcError> {
         self.node.known_network().ok_or(RpcError::NoKnownNetwork)
     }
 
+    /// A helper function used to pass a single value to the RPC handler.
     pub async fn map_rpc_singlet<
         A: DeserializeOwned,
         O: Serialize,
@@ -121,6 +126,7 @@ impl RpcImpl {
         }
     }
 
+    /// A helper function used to pass calls to the RPC handler.
     pub async fn map_rpc<O: Serialize, Fut: Future<Output = Result<O, RpcError>>, F: Fn(Self) -> Fut>(
         self,
         callee: F,
@@ -408,11 +414,13 @@ impl RpcFunctions for RpcImpl {
     async fn get_node_info(&self) -> Result<NodeInfo, RpcError> {
         Ok(NodeInfo {
             listening_addr: self.node.config.desired_address,
-            is_bootnode: self.node.config.is_bootnode(),
-            is_miner: self.sync_handler()?.is_miner,
+            node_type: self.node.config.node_type,
+            is_miner: self.sync_handler().map(|sync| sync.is_miner).unwrap_or(false),
             is_syncing: self.node.is_syncing_blocks(),
             launched: self.node.launched,
             version: env!("CARGO_PKG_VERSION").into(),
+            min_peers: self.node.config.minimum_number_of_connected_peers(),
+            max_peers: self.node.config.maximum_number_of_connected_peers(),
         })
     }
 
@@ -480,18 +488,15 @@ impl RpcFunctions for RpcImpl {
             .iter()
             .map(|(addr, node_centrality)| Vertice {
                 addr: *addr,
-                is_bootnode: self.node.config.bootnodes().contains(addr),
+                is_beacon: self.node.config.beacons().contains(addr),
+                is_sync_provider: self.node.config.sync_providers().contains(addr),
                 degree_centrality: node_centrality.degree_centrality,
                 eigenvector_centrality: node_centrality.eigenvector_centrality,
                 fiedler_value: node_centrality.fiedler_value,
             })
             .collect();
 
-        let potential_forks = known_network
-            .potential_forks()
-            .into_iter()
-            .map(|(height, members)| PotentialFork { height, members })
-            .collect();
+        let (potential_tip, potential_forks) = known_network.potential_forks();
 
         let node_count = if network_metrics.node_count == 0 {
             known_network.nodes().len()
@@ -505,6 +510,7 @@ impl RpcFunctions for RpcImpl {
             density: network_metrics.density,
             algebraic_connectivity: network_metrics.algebraic_connectivity,
             degree_centrality_delta: network_metrics.degree_centrality_delta,
+            potential_tip,
             potential_forks,
             vertices,
             edges,

@@ -14,17 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
+use std::time::Instant;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-use snarkos_metrics::{self as metrics, queues::*};
+use snarkos_metrics::{self as metrics, wrapped_mpsc};
 
 use crate::{NetworkError, Payload, Peer};
 
@@ -43,8 +37,7 @@ pub(super) enum PeerAction {
 
 #[derive(Clone, Debug)]
 pub struct PeerHandle {
-    pub(super) sender: mpsc::Sender<PeerAction>,
-    pub queued_outbound_message_count: Arc<AtomicUsize>,
+    pub(super) sender: wrapped_mpsc::Sender<PeerAction>,
 }
 
 impl PeerHandle {
@@ -64,10 +57,7 @@ impl PeerHandle {
     }
 
     pub async fn send_payload(&self, payload: Payload, time_received: Option<Instant>) {
-        if self.sender.send(PeerAction::Send(payload, time_received)).await.is_ok() {
-            self.queued_outbound_message_count.fetch_add(1, Ordering::SeqCst);
-            metrics::increment_gauge!(OUTBOUND, 1.0);
-        }
+        self.sender.send(PeerAction::Send(payload, time_received)).await.ok();
     }
 
     pub async fn cancel_sync(&self) {
@@ -101,9 +91,22 @@ impl Peer {
         match message {
             PeerAction::Disconnect => Ok(PeerResponse::Disconnect),
             PeerAction::Send(message, time_received) => {
-                if matches!(message, Payload::Ping(_)) {
-                    self.quality.expecting_pong = true;
-                    self.quality.last_ping_sent = Some(Instant::now());
+                match &message {
+                    Payload::Ping(_) => {
+                        self.quality.expecting_pong = true;
+                        self.quality.last_ping_sent = Some(Instant::now());
+                    }
+                    Payload::Block(block, _) => {
+                        if self.block_received_cache.contains(&block[..]) {
+                            metrics::increment_counter!(metrics::outbound::ALL_CACHE_HITS);
+                            return Ok(PeerResponse::None);
+                        }
+                        self.quality.blocks_sent_to += 1;
+                    }
+                    Payload::SyncBlock(..) => {
+                        self.quality.blocks_synced_to += 1;
+                    }
+                    _ => (),
                 }
 
                 network.write_payload(&message).await.map_err(|e| {
@@ -123,9 +126,6 @@ impl Peer {
                 }
 
                 metrics::increment_counter!(metrics::outbound::ALL_SUCCESSES);
-
-                self.queued_outbound_message_count.fetch_sub(1, Ordering::SeqCst);
-                metrics::decrement_gauge!(OUTBOUND, 1.0);
 
                 match &message {
                     Payload::SyncBlock(..) => trace!("Sent a '{}' message to {}", &message, self.address),
@@ -170,13 +170,13 @@ impl Peer {
                 if self.quality.remaining_sync_blocks > 0 {
                     self.quality.remaining_sync_blocks -= 1;
                 } else {
-                    warn!("received unexpected or late sync block from {}", self.address);
+                    trace!("received unexpected or late sync block from {}", self.address);
                 }
                 Ok(PeerResponse::None)
             }
             PeerAction::ExpectingSyncBlocks(amount) => {
-                self.quality.remaining_sync_blocks = amount;
-                self.quality.total_sync_blocks = amount;
+                self.quality.remaining_sync_blocks += amount;
+                self.quality.total_sync_blocks += amount;
                 Ok(PeerResponse::None)
             }
             PeerAction::SoftFail => {

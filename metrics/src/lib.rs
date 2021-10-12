@@ -22,6 +22,9 @@ pub use names::*;
 pub mod snapshots;
 pub mod stats;
 
+pub mod wrapped_mpsc;
+pub use wrapped_mpsc::*;
+
 /// Re-export metrics macros
 pub use metrics::*;
 
@@ -96,7 +99,13 @@ pub fn initialize() -> Option<tokio::task::JoinHandle<()>> {
 
 #[cfg(not(feature = "prometheus"))]
 pub fn initialize() -> Option<tokio::task::JoinHandle<()>> {
+    #[cfg(not(feature = "test"))]
     metrics::set_recorder(&crate::stats::NODE_STATS).expect("couldn't initialize the metrics recorder!");
+
+    // Let the errors through in case the recorder has already been set as is likely when running
+    // multiple metrics tests.
+    #[cfg(feature = "test")]
+    let _ = metrics::set_recorder(&crate::stats::NODE_STATS);
 
     None
 }

@@ -20,6 +20,7 @@ use crate::{
     metric_types::{CircularHistogram, Counter, DiscreteGauge},
     names::*,
     snapshots::{
+        NodeBlockStats,
         NodeConnectionStats,
         NodeHandshakeStats,
         NodeInboundStats,
@@ -46,6 +47,8 @@ pub struct Stats {
     queues: QueueStats,
     /// Miscellaneous stats related to the node.
     misc: MiscStats,
+    /// The node's block-related stats.
+    blocks: BlockStats,
     /// The node's internal RTT from message received to response sent (in seconds).
     internal_rtt: InternalRtt,
 }
@@ -59,6 +62,7 @@ impl Stats {
             handshakes: HandshakeStats::new(),
             queues: QueueStats::new(),
             misc: MiscStats::new(),
+            blocks: BlockStats::new(),
             internal_rtt: InternalRtt::new(),
         }
     }
@@ -71,8 +75,21 @@ impl Stats {
             handshakes: self.handshakes.snapshot(),
             queues: self.queues.snapshot(),
             misc: self.misc.snapshot(),
+            blocks: self.blocks.snapshot(),
             internal_rtt: self.internal_rtt.snapshot(),
         }
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.inbound.clear();
+        self.outbound.clear();
+        self.connections.clear();
+        self.handshakes.clear();
+        self.queues.clear();
+        self.misc.clear();
+        self.blocks.clear();
+        self.internal_rtt.clear();
     }
 }
 
@@ -149,6 +166,25 @@ impl InboundStats {
             unknown: self.unknown.read(),
         }
     }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.all_successes.clear();
+        self.all_failures.clear();
+        self.blocks.clear();
+        self.getblocks.clear();
+        self.getmemorypool.clear();
+        self.getpeers.clear();
+        self.getsync.clear();
+        self.memorypool.clear();
+        self.peers.clear();
+        self.pings.clear();
+        self.pongs.clear();
+        self.syncs.clear();
+        self.syncblocks.clear();
+        self.transactions.clear();
+        self.unknown.clear();
+    }
 }
 
 pub struct OutboundStats {
@@ -156,6 +192,8 @@ pub struct OutboundStats {
     all_successes: Counter,
     /// The number of messages that failed to be sent to peers.
     all_failures: Counter,
+    /// The number of messages that were going to be sent to a peer, but was blocked at the last minute by a cache.
+    all_cache_hits: Counter,
 }
 
 impl OutboundStats {
@@ -163,6 +201,7 @@ impl OutboundStats {
         Self {
             all_successes: Counter::new(),
             all_failures: Counter::new(),
+            all_cache_hits: Counter::new(),
         }
     }
 
@@ -170,7 +209,15 @@ impl OutboundStats {
         NodeOutboundStats {
             all_successes: self.all_successes.read(),
             all_failures: self.all_failures.read(),
+            all_cache_hits: self.all_cache_hits.read(),
         }
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.all_successes.clear();
+        self.all_failures.clear();
+        self.all_cache_hits.clear();
     }
 }
 
@@ -187,6 +234,8 @@ pub struct ConnectionStats {
     connected_peers: DiscreteGauge,
     /// Number of known disconnected peers.
     disconnected_peers: DiscreteGauge,
+    /// Tracks connection durations (once closed).
+    duration: CircularHistogram,
 }
 
 impl ConnectionStats {
@@ -198,6 +247,7 @@ impl ConnectionStats {
             connecting_peers: DiscreteGauge::new(),
             connected_peers: DiscreteGauge::new(),
             disconnected_peers: DiscreteGauge::new(),
+            duration: CircularHistogram::new(),
         }
     }
 
@@ -206,10 +256,22 @@ impl ConnectionStats {
             all_accepted: self.all_accepted.read(),
             all_initiated: self.all_initiated.read(),
             all_rejected: self.all_rejected.read(),
+            average_duration: self.duration.average(),
             connecting_peers: self.connecting_peers.read() as u32,
             connected_peers: self.connected_peers.read() as u32,
             disconnected_peers: self.disconnected_peers.read() as u32,
         }
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.all_accepted.clear();
+        self.all_initiated.clear();
+        self.all_rejected.clear();
+        self.duration.clear();
+        self.connecting_peers.clear();
+        self.connected_peers.clear();
+        self.disconnected_peers.clear();
     }
 }
 
@@ -250,12 +312,22 @@ impl HandshakeStats {
             timeouts_resp: self.timeouts_resp.read(),
         }
     }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.successes_init.clear();
+        self.successes_resp.clear();
+        self.failures_init.clear();
+        self.failures_resp.clear();
+        self.timeouts_init.clear();
+        self.timeouts_resp.clear();
+    }
 }
 
 pub struct QueueStats {
     /// The number of queued consensus items.
     consensus: DiscreteGauge,
-    /// The number of messages queued in the common inbound channel.
+    /// The number of messages queued in the individual inbound channels.
     inbound: DiscreteGauge,
     /// The number of messages queued in the individual outbound channels.
     outbound: DiscreteGauge,
@@ -289,18 +361,19 @@ impl QueueStats {
             sync_items: self.sync_items.read(),
         }
     }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.consensus.clear();
+        self.inbound.clear();
+        self.outbound.clear();
+        self.peer_events.clear();
+        self.storage.clear();
+        self.sync_items.clear();
+    }
 }
 
 pub struct MiscStats {
-    block_height: DiscreteGauge,
-    /// The number of mined blocks.
-    blocks_mined: Counter,
-    /// The number of duplicate blocks received.
-    duplicate_blocks: Counter,
-    /// The number of duplicate sync blocks received.
-    duplicate_sync_blocks: Counter,
-    /// The number of orphan blocks received.
-    orphan_blocks: Counter,
     /// The number of RPC requests received.
     rpc_requests: Counter,
 }
@@ -308,24 +381,73 @@ pub struct MiscStats {
 impl MiscStats {
     const fn new() -> Self {
         Self {
-            block_height: DiscreteGauge::new(),
-            blocks_mined: Counter::new(),
-            duplicate_blocks: Counter::new(),
-            duplicate_sync_blocks: Counter::new(),
-            orphan_blocks: Counter::new(),
             rpc_requests: Counter::new(),
         }
     }
 
     pub fn snapshot(&self) -> NodeMiscStats {
         NodeMiscStats {
-            block_height: self.block_height.read(),
-            blocks_mined: self.blocks_mined.read(),
-            duplicate_blocks: self.duplicate_blocks.read(),
-            duplicate_sync_blocks: self.duplicate_sync_blocks.read(),
-            orphan_blocks: self.orphan_blocks.read(),
             rpc_requests: self.rpc_requests.read(),
         }
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.rpc_requests.clear();
+    }
+}
+
+pub struct BlockStats {
+    /// The block height of the node's canon chain.
+    height: DiscreteGauge,
+    /// The number of mined blocks.
+    mined: Counter,
+    /// The processing time for an inbound block.
+    inbound_processing_time: CircularHistogram,
+    /// The verification and commit time for a block.
+    commit_time: CircularHistogram,
+    /// The number of duplicate blocks received.
+    duplicates: Counter,
+    /// The number of duplicate sync blocks received.
+    duplicates_sync: Counter,
+    /// The number of orphan blocks received.
+    orphans: Counter,
+}
+
+impl BlockStats {
+    const fn new() -> Self {
+        BlockStats {
+            height: DiscreteGauge::new(),
+            mined: Counter::new(),
+            inbound_processing_time: CircularHistogram::new(),
+            commit_time: CircularHistogram::new(),
+            duplicates: Counter::new(),
+            duplicates_sync: Counter::new(),
+            orphans: Counter::new(),
+        }
+    }
+
+    pub fn snapshot(&self) -> NodeBlockStats {
+        NodeBlockStats {
+            height: self.height.read(),
+            mined: self.mined.read(),
+            inbound_processing_time: self.inbound_processing_time.average(),
+            commit_time: self.commit_time.average(),
+            duplicates: self.duplicates.read(),
+            duplicates_sync: self.duplicates_sync.read(),
+            orphans: self.orphans.read(),
+        }
+    }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.height.clear();
+        self.mined.clear();
+        self.inbound_processing_time.clear();
+        self.commit_time.clear();
+        self.duplicates.clear();
+        self.duplicates_sync.clear();
+        self.orphans.clear();
     }
 }
 
@@ -356,6 +478,14 @@ impl InternalRtt {
             getmemorypool: self.getmemorypool.average(),
         }
     }
+
+    #[cfg(feature = "test")]
+    pub fn clear(&self) {
+        self.getpeers.clear();
+        self.getsync.clear();
+        self.getblocks.clear();
+        self.getmemorypool.clear();
+    }
 }
 
 impl Recorder for Stats {
@@ -368,6 +498,9 @@ impl Recorder for Stats {
 
     fn record_histogram(&self, key: &Key, value: f64) {
         let metric = match key.name() {
+            connections::DURATION => &self.connections.duration,
+            blocks::INBOUND_PROCESSING_TIME => &self.blocks.inbound_processing_time,
+            blocks::COMMIT_TIME => &self.blocks.commit_time,
             internal_rtt::GETPEERS => &self.internal_rtt.getpeers,
             internal_rtt::GETSYNC => &self.internal_rtt.getsync,
             internal_rtt::GETBLOCKS => &self.internal_rtt.getblocks,
@@ -399,6 +532,7 @@ impl Recorder for Stats {
             // outbound
             outbound::ALL_SUCCESSES => &self.outbound.all_successes,
             outbound::ALL_FAILURES => &self.outbound.all_failures,
+            outbound::ALL_CACHE_HITS => &self.outbound.all_cache_hits,
             // connections
             connections::ALL_ACCEPTED => &self.connections.all_accepted,
             connections::ALL_INITIATED => &self.connections.all_initiated,
@@ -411,11 +545,12 @@ impl Recorder for Stats {
             handshakes::TIMEOUTS_INIT => &self.handshakes.timeouts_init,
             handshakes::TIMEOUTS_RESP => &self.handshakes.timeouts_resp,
             // misc
-            misc::BLOCKS_MINED => &self.misc.blocks_mined,
-            misc::DUPLICATE_BLOCKS => &self.misc.duplicate_blocks,
-            misc::DUPLICATE_SYNC_BLOCKS => &self.misc.duplicate_sync_blocks,
-            misc::ORPHAN_BLOCKS => &self.misc.orphan_blocks,
             misc::RPC_REQUESTS => &self.misc.rpc_requests,
+            // blocks
+            blocks::MINED => &self.blocks.mined,
+            blocks::DUPLICATES => &self.blocks.duplicates,
+            blocks::DUPLICATES_SYNC => &self.blocks.duplicates_sync,
+            blocks::ORPHANS => &self.blocks.orphans,
             _ => {
                 return;
             }
@@ -426,12 +561,14 @@ impl Recorder for Stats {
     fn update_gauge(&self, key: &Key, value: GaugeValue) {
         let metric = match key.name() {
             // queues
+            queues::CONSENSUS => &self.queues.consensus,
             queues::INBOUND => &self.queues.inbound,
             queues::OUTBOUND => &self.queues.outbound,
             queues::PEER_EVENTS => &self.queues.peer_events,
             queues::STORAGE => &self.queues.storage,
-            // misc
-            misc::BLOCK_HEIGHT => &self.misc.block_height,
+            queues::SYNC_ITEMS => &self.queues.sync_items,
+            // blocks
+            blocks::HEIGHT => &self.blocks.height,
             // connections
             connections::CONNECTING => &self.connections.connecting_peers,
             connections::CONNECTED => &self.connections.connected_peers,

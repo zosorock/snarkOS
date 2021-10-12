@@ -25,25 +25,17 @@ pub use trim::*;
 pub mod storage;
 pub use storage::*;
 
-pub mod key_value;
-pub use key_value::KeyValueStorage;
-
 pub mod objects;
 pub use objects::*;
 
 pub mod digest;
 pub use digest::*;
 
-pub mod mem;
-pub use mem::MemDb;
-
-#[cfg(feature = "rocksdb_storage")]
-mod rocks;
-#[cfg(feature = "rocksdb_storage")]
-pub use rocks::RocksDb;
-
 pub mod validator;
 pub use validator::*;
+
+pub mod migrate;
+pub use migrate::*;
 
 /// The number of block hashes that are returned by the `Ledger::get_block_locator_hashes` call.
 pub const NUM_LOCATOR_HASHES: u32 = 64;

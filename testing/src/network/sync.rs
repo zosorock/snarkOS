@@ -14,19 +14,19 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use snarkos_storage::{BlockStatus, Digest, VMBlock};
+use snarkos_storage::{BlockStatus, VMBlock};
 use snarkvm_utilities::to_bytes_le;
 use tokio::time::sleep;
 
 use crate::{
-    network::{handshaken_node_and_peer, test_node, ConsensusSetup, TestSetup},
+    network::{handshaken_node_and_peer, handshaken_peer, test_node, ConsensusSetup, TestSetup},
     sync::{BLOCK_1, BLOCK_1_HEADER_HASH, BLOCK_2, BLOCK_2_HEADER_HASH, TRANSACTION_2},
     wait_until,
 };
 
 use snarkos_network::message::*;
 
-use snarkvm_dpc::{block_header_hash::BlockHeaderHash, testnet1::instantiated::Testnet1Transaction, Block};
+use snarkvm_dpc::{testnet1::instantiated::Testnet1Transaction, Block};
 #[cfg(test)]
 use snarkvm_utilities::ToBytes;
 
@@ -73,8 +73,8 @@ async fn block_initiator_side() {
         matches!(payload, Payload::GetSync(..))
     });
 
-    let block_1_header_hash = BlockHeaderHash::new(BLOCK_1_HEADER_HASH.to_vec());
-    let block_2_header_hash = BlockHeaderHash::new(BLOCK_2_HEADER_HASH.to_vec());
+    let block_1_header_hash = BLOCK_1_HEADER_HASH.clone();
+    let block_2_header_hash = BLOCK_2_HEADER_HASH.clone();
 
     let block_header_hashes = vec![block_1_header_hash.clone(), block_2_header_hash.clone()];
 
@@ -83,12 +83,15 @@ async fn block_initiator_side() {
     let sync = Payload::Sync(block_header_hashes);
     peer.write_message(&sync).await;
 
+    assert!(matches!(peer.read_payload().await.unwrap(), Payload::GetSync(_)));
+
     // make sure both GetBlock messages are received
     let payload = peer.read_payload().await.unwrap();
+
     let block_hashes = if let Payload::GetBlocks(block_hashes) = payload {
         block_hashes
     } else {
-        unreachable!();
+        panic!("unexpected payload in test: {:?}", payload);
     };
 
     assert!(block_hashes.contains(&block_1_header_hash) && block_hashes.contains(&block_2_header_hash));
@@ -101,23 +104,18 @@ async fn block_initiator_side() {
     peer.write_message(&block_2).await;
 
     // check the blocks have been added to the node's chain
+    // can take a while since sync runs in 60 second rounds before committing anything.
     wait_until!(
-        5,
+        65,
         matches!(
-            node.storage
-                .get_block_state(&block_1_header_hash.0.into())
-                .await
-                .unwrap(),
+            node.storage.get_block_state(&block_1_header_hash).await.unwrap(),
             BlockStatus::Committed(_)
         )
     );
     wait_until!(
         1,
         matches!(
-            node.storage
-                .get_block_state(&block_2_header_hash.0.into())
-                .await
-                .unwrap(),
+            node.storage.get_block_state(&block_2_header_hash).await.unwrap(),
             BlockStatus::Committed(_)
         )
     );
@@ -151,9 +149,8 @@ async fn block_responder_side() {
     };
 
     let block_header_hash = sync.get(1).unwrap();
-    let block_header_hash_digest: Digest = block_header_hash.0.into();
     // check it matches the block inserted into the node's ledger
-    assert_eq!(block_header_hash_digest, block_struct_1.header.hash());
+    assert_eq!(block_header_hash, &block_struct_1.header.hash());
 
     // request the block from the node
     let get_block = Payload::GetBlocks(vec![block_header_hash.clone()]);
@@ -172,31 +169,27 @@ async fn block_responder_side() {
     assert_eq!(block, block_struct_1);
 }
 
-#[test]
-#[ignore]
-fn block_propagation() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn block_propagation() {
+    let (node, mut peer) = handshaken_node_and_peer(TestSetup::default()).await;
+    let mut peer2 = handshaken_peer(node.expect_local_addr()).await;
 
-    let setup = TestSetup {
-        consensus_setup: Some(ConsensusSetup {
-            is_miner: true,
-            ..Default::default()
-        }),
-        tokio_handle: Some(rt.handle().clone()),
-        ..Default::default()
-    };
+    let block_1 = BLOCK_1.serialize();
+    let payload = Payload::Block(block_1.clone(), Some(1));
+    peer.write_message(&payload).await;
 
-    rt.block_on(async move {
-        let (_node, mut peer) = handshaken_node_and_peer(setup).await;
+    wait_until!(5, node.storage.canon().await.unwrap().block_height == 1);
 
-        wait_until!(60, {
-            let payload = peer.read_payload().await.unwrap();
-            matches!(payload, Payload::Block(..))
-        });
+    node.peer_book.broadcast(Payload::Ping(1)).await;
+
+    wait_until!(
+        10,
+        matches!(peer2.read_payload().await.unwrap(), Payload::Block(x, Some(1)) if x == block_1)
+    );
+    wait_until!(30, match peer.read_payload().await.unwrap() {
+        Payload::Block(_, _) => unreachable!(),
+        Payload::Ping(1) => true,
+        _ => false,
     });
 }
 
@@ -208,7 +201,7 @@ async fn block_two_node() {
         ..Default::default()
     };
     let node_alice = test_node(setup).await;
-    let alice_address = node_alice.local_address().unwrap();
+    let alice_address = node_alice.expect_local_addr();
 
     const NUM_BLOCKS: usize = 100;
 
@@ -225,10 +218,10 @@ async fn block_two_node() {
             ..Default::default()
         }),
         peer_sync_interval: 5,
-        bootnodes: vec![alice_address.to_string()],
         ..Default::default()
     };
     let node_bob = test_node(setup).await;
+    node_bob.connect_to_addresses(&[alice_address]).await;
 
     // check blocks present in alice's chain were synced to bob's
     wait_until!(30, node_bob.storage.canon().await.unwrap().block_height == NUM_BLOCKS);
@@ -324,7 +317,7 @@ async fn transaction_responder_side() {
 #[tokio::test]
 async fn transaction_two_node() {
     let node_alice = test_node(TestSetup::default()).await;
-    let alice_address = node_alice.local_address().unwrap();
+    let alice_address = node_alice.expect_local_addr();
 
     // insert transaction into node_alice
     assert!(
@@ -341,10 +334,10 @@ async fn transaction_two_node() {
             ..Default::default()
         }),
         peer_sync_interval: 1,
-        bootnodes: vec![alice_address.to_string()],
         ..Default::default()
     };
     let node_bob = test_node(setup).await;
+    node_bob.connect_to_addresses(&[alice_address]).await;
 
     // check transaction is present in bob's memory pool
     wait_until!(

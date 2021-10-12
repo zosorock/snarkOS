@@ -14,10 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use snarkos_network::{MessageHeader, Payload, Version};
-use snarkvm_dpc::BlockHeaderHash;
+use snarkos_network::{MessageHeader, NodeType, Payload, Version};
 
 use rand::{distributions::Standard, thread_rng, Rng};
+use snarkos_storage::Digest;
 use snarkos_testing::{
     network::{handshaken_node_and_peer, spawn_2_fake_nodes, test_node, TestSetup},
     wait_until,
@@ -53,12 +53,12 @@ fn corrupt_bytes(serialized: &[u8]) -> Vec<u8> {
 #[tokio::test]
 async fn fuzzing_zeroes_pre_handshake() {
     let node_setup = TestSetup {
+        node_type: NodeType::Beacon, // same rules for establishing connections and reading messages as a regular node, but lighter
         consensus_setup: None,
-        is_bootnode: true, // same rules for establishing connections and reading messages as a regular node, but lighter
         ..Default::default()
     };
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     let mut stream = TcpStream::connect(node_addr).await.unwrap();
     wait_until!(1, node.peer_book.get_active_peer_count() == 1);
@@ -70,8 +70,8 @@ async fn fuzzing_zeroes_pre_handshake() {
 #[tokio::test]
 async fn fuzzing_zeroes_post_handshake() {
     let node_setup = TestSetup {
+        node_type: NodeType::Beacon, // same rules for establishing connections and reading messages as a regular node, but lighter
         consensus_setup: None,
-        is_bootnode: true,
         ..Default::default()
     };
     let (node, mut fake_node) = handshaken_node_and_peer(node_setup).await;
@@ -86,12 +86,12 @@ async fn fuzzing_valid_header_pre_handshake() {
     // tracing_subscriber::fmt::init();
 
     let node_setup = TestSetup {
+        node_type: NodeType::Beacon, // same rules for establishing connections and reading messages as a regular node, but lighter
         consensus_setup: None,
-        is_bootnode: true,
         ..Default::default()
     };
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     for _ in 0..ITERATIONS {
         let random_len: usize = thread_rng().gen_range(1..(64 * 1024));
@@ -139,12 +139,12 @@ async fn fuzzing_pre_handshake() {
     // tracing_subscriber::fmt::init();
 
     let node_setup = TestSetup {
+        node_type: NodeType::Beacon, // same rules for establishing connections and reading messages as a regular node, but lighter
         consensus_setup: None,
-        is_bootnode: true,
         ..Default::default()
     };
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     for _ in 0..ITERATIONS {
         let random_len: usize = thread_rng().gen_range(1..(64 * 1024));
@@ -195,7 +195,7 @@ async fn fuzzing_corrupted_version_pre_handshake() {
     };
 
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     for i in 0..ITERATIONS {
         let mut stream = TcpStream::connect(node_addr).await.unwrap();
@@ -264,7 +264,7 @@ async fn fuzzing_corrupted_empty_payloads_pre_handshake() {
     };
 
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     for payload in &[Payload::GetMemoryPool, Payload::GetPeers, Payload::Pong] {
         let serialized = Payload::serialize(payload).unwrap();
@@ -329,7 +329,7 @@ async fn fuzzing_corrupted_payloads_with_bodies_pre_handshake() {
     };
 
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     let mut rng = thread_rng();
     let random_len: usize = rng.gen_range(1..(64 * 1024));
@@ -448,9 +448,9 @@ async fn fuzzing_corrupted_payloads_with_hashes_pre_handshake() {
     };
 
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
-    let hashes: Vec<BlockHeaderHash> = (0u8..10).map(|i| BlockHeaderHash::new(vec![i; 32])).collect();
+    let hashes: Vec<Digest> = (0u8..10).map(|i| Digest::from([i; 32])).collect();
 
     for payload in &[
         Payload::GetBlocks(hashes.clone()),
@@ -491,7 +491,7 @@ async fn fuzzing_corrupted_payloads_with_hashes_post_handshake() {
         }
     });
 
-    let hashes: Vec<BlockHeaderHash> = (0u8..10).map(|i| BlockHeaderHash::new(vec![i; 32])).collect();
+    let hashes: Vec<Digest> = (0u8..10).map(|i| Digest::from([i; 32])).collect();
 
     for payload in &[
         Payload::GetBlocks(hashes.clone()),
@@ -527,7 +527,7 @@ async fn connection_request_spam() {
     };
 
     let node = test_node(node_setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     let sockets = Arc::new(Mutex::new(Vec::with_capacity(NUM_ATTEMPTS)));
 
@@ -543,7 +543,7 @@ async fn connection_request_spam() {
     wait_until!(3, node.peer_book.get_active_peer_count() >= max_peers as u32);
 
     wait_until!(
-        snarkos_network::HANDSHAKE_PEER_TIMEOUT_SECS as u64 * 2,
+        snarkos_network::HANDSHAKE_TIMEOUT_SECS as u64 * 2,
         node.peer_book.get_active_peer_count() == 0
     );
 }

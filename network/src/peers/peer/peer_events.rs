@@ -16,14 +16,16 @@
 
 use std::net::SocketAddr;
 
-use crate::{Peer, PeerHandle, PeerStatus};
+use crate::{Peer, PeerHandle};
 
+#[derive(Debug)]
 pub enum PeerEventData {
     Connected(PeerHandle),
-    Disconnect(Peer, PeerStatus),
+    Disconnect(Box<Peer>),
     FailHandshake,
 }
 
+#[derive(Debug)]
 pub struct PeerEvent {
     pub address: SocketAddr,
     pub data: PeerEventData,

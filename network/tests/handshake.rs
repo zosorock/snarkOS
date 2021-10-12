@@ -15,12 +15,11 @@
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
 use snarkos_network::{message::*, Node, Version};
+use snarkos_storage::Digest;
 use snarkos_testing::{
     network::{test_node, write_message_to_stream, TestSetup},
     wait_until,
 };
-
-use snarkvm_dpc::block_header_hash::BlockHeaderHash;
 
 use std::time::Duration;
 
@@ -38,7 +37,7 @@ async fn handshake_responder_side() {
         ..Default::default()
     };
     let node = test_node(setup).await;
-    let node_listener = node.local_address().unwrap();
+    let node_listener = node.expect_local_addr();
 
     // set up a fake node (peer), which is just a socket
     let mut peer_stream = TcpStream::connect(&node_listener).await.unwrap();
@@ -91,15 +90,14 @@ async fn handshake_initiator_side() {
     let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_address = peer_listener.local_addr().unwrap();
 
-    // start node with the peer as a bootnode; that way it will get connected to
     // note: using the smallest allowed interval for peer sync
     let setup = TestSetup {
         consensus_setup: None,
-        bootnodes: vec![peer_address.to_string()],
         peer_sync_interval: 1,
         ..Default::default()
     };
     let node = test_node(setup).await;
+    node.connect_to_addresses(&[peer_address]).await;
 
     // accept the node's connection on peer side
     let (mut peer_stream, _node_address) = peer_listener.accept().await.unwrap();
@@ -169,7 +167,7 @@ async fn reject_non_version_messages_before_handshake() {
 
     // start the fake node (peer) which is just a socket
     // note: the connection needs to be re-established as it is reset
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
 
     // send a GetPeers message without a prior handshake established
     write_message_to_stream(Payload::GetPeers, &mut peer_stream).await;
@@ -179,56 +177,56 @@ async fn reject_non_version_messages_before_handshake() {
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // GetMemoryPool
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     write_message_to_stream(Payload::GetMemoryPool, &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // GetBlock
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
-    let block_hash = BlockHeaderHash::new([0u8; 32].to_vec());
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
+    let block_hash = Digest::from([0u8; 32]);
     write_message_to_stream(Payload::GetBlocks(vec![block_hash]), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // GetSync
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
-    let block_hash = BlockHeaderHash::new([0u8; 32].to_vec());
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
+    let block_hash = Digest::from([0u8; 32]);
     write_message_to_stream(Payload::GetSync(vec![block_hash]), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // Peers
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     let peers = vec!["127.0.0.1:0".parse().unwrap()];
     write_message_to_stream(Payload::Peers(peers), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // MemoryPool
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     let memory_pool = vec![vec![0u8, 10]];
     write_message_to_stream(Payload::MemoryPool(memory_pool), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // Block
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     let block = vec![0u8, 10];
     let height = None;
     write_message_to_stream(Payload::Block(block, height), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // SyncBlock
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     let sync_block = vec![0u8, 10];
     let height = Some(1);
     write_message_to_stream(Payload::SyncBlock(sync_block, height), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // Sync
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
-    let block_hash = BlockHeaderHash::new(vec![0u8; 32]);
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
+    let block_hash = Digest::from([0u8; 32]);
     write_message_to_stream(Payload::Sync(vec![block_hash]), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
 
     // Transaction
-    let mut peer_stream = TcpStream::connect(node.local_address().unwrap()).await.unwrap();
+    let mut peer_stream = TcpStream::connect(node.expect_local_addr()).await.unwrap();
     let transaction = vec![0u8, 10];
     write_message_to_stream(Payload::Transaction(transaction), &mut peer_stream).await;
     assert_node_rejected_message(&node, &mut peer_stream).await;
@@ -236,18 +234,18 @@ async fn reject_non_version_messages_before_handshake() {
 
 #[tokio::test]
 async fn handshake_timeout_initiator_side() {
-    const NUM_BOOTSTRAPPERS: usize = 5;
+    const NUM_BEACONS: usize = 5;
 
-    // set up bootnodes that won't perform a valid handshake
-    let mut failing_bootnodes = Vec::with_capacity(NUM_BOOTSTRAPPERS);
-    for _ in 0..NUM_BOOTSTRAPPERS {
-        failing_bootnodes.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    // set up beacons that won't perform a valid handshake
+    let mut failing_beacons = Vec::with_capacity(NUM_BEACONS);
+    for _ in 0..NUM_BEACONS {
+        failing_beacons.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
     }
 
     // start the node
     let setup = TestSetup {
         consensus_setup: None,
-        bootnodes: failing_bootnodes
+        beacons: failing_beacons
             .iter()
             .map(|l| {
                 let addr = l.local_addr().unwrap();
@@ -258,12 +256,12 @@ async fn handshake_timeout_initiator_side() {
     };
     let node = test_node(setup).await;
 
-    // the node should start connecting to all the configured bootnodes
+    // the node should start connecting to all the configured beacons.
     wait_until!(3, node.peer_book.get_active_peer_count() != 0);
 
     // but since they won't reply, it should drop them after the handshake deadline
     wait_until!(
-        snarkos_network::HANDSHAKE_BOOTNODE_TIMEOUT_SECS as u64 + 1,
+        snarkos_network::HANDSHAKE_TIMEOUT_SECS as u64 + 1,
         node.peer_book.get_active_peer_count() == 0
     );
 }
@@ -276,7 +274,7 @@ async fn handshake_timeout_responder_side() {
         ..Default::default()
     };
     let node = test_node(setup).await;
-    let node_addr = node.local_address().unwrap();
+    let node_addr = node.expect_local_addr();
 
     // set up a "peer" that won't perform a valid handshake
     let _fake_peer = TcpStream::connect(node_addr).await.unwrap();
@@ -286,7 +284,7 @@ async fn handshake_timeout_responder_side() {
 
     // but since it won't conclude the handshake, it should be dropped after the handshake deadline
     wait_until!(
-        snarkos_network::HANDSHAKE_PEER_TIMEOUT_SECS as u64 + 1,
+        snarkos_network::HANDSHAKE_TIMEOUT_SECS as u64 + 1,
         node.peer_book.get_active_peer_count() == 0
     );
 }

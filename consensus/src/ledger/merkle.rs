@@ -24,8 +24,6 @@ use snarkvm_algorithms::MerkleParameters;
 
 use super::indexed_merkle_tree::IndexedMerkleTree;
 
-// TODO: make this not-cloneable, as it's very expensive, but necessary without some refactors in snarkVM merkle tree.
-#[derive(Clone)]
 pub struct MerkleLedger<P: MerkleParameters> {
     ledger_digests: IndexSet<Digest>,
     commitments: IndexedMerkleTree<P>,
@@ -57,35 +55,36 @@ impl<P: MerkleParameters> Ledger for MerkleLedger<P> {
         new_serial_numbers: &[Digest],
         new_memos: &[Digest],
     ) -> Result<Digest> {
-        let mut new_self = self.clone();
-        new_self.commitments.extend(new_commitments)?;
-        new_self.serial_numbers.extend(new_serial_numbers)?;
-        new_self.memos.extend(new_memos);
+        self.commitments.extend(new_commitments)?;
+        self.serial_numbers.extend(new_serial_numbers)?;
+        self.memos.extend(new_memos);
 
-        let new_digest = new_self.commitments.digest();
-        new_self.ledger_digests.insert(new_digest.clone());
+        let new_digest = self.commitments.digest();
+        self.ledger_digests.insert(new_digest.clone());
 
-        *self = new_self;
         Ok(new_digest)
     }
 
+    fn push_interim_digests(&mut self, new_ledger_digests: &[Digest]) -> Result<()> {
+        self.ledger_digests.extend(new_ledger_digests.iter().cloned());
+        Ok(())
+    }
+
     fn rollback(&mut self, commitments: &[Digest], serial_numbers: &[Digest], memos: &[Digest]) -> Result<()> {
-        let mut new_self = self.clone();
         debug!(
             "rolling back merkle ledger: {} commitments, {} serial numbers, {} memos",
             commitments.len(),
             serial_numbers.len(),
             memos.len()
         );
-        new_self.commitments.pop(commitments)?;
-        new_self.serial_numbers.pop(serial_numbers)?;
-        new_self.memos.pop(memos)?;
+        self.commitments.pop(commitments)?;
+        self.serial_numbers.pop(serial_numbers)?;
+        self.memos.pop(memos)?;
 
-        let new_digest = new_self.commitments.digest();
-        for i in (0..new_self.ledger_digests.len()).rev() {
-            if new_self.ledger_digests[i] == new_digest {
-                new_self.ledger_digests.truncate(i + 1);
-                *self = new_self;
+        let new_digest = self.commitments.digest();
+        for i in (0..self.ledger_digests.len()).rev() {
+            if self.ledger_digests[i] == new_digest {
+                self.ledger_digests.truncate(i + 1);
                 return Ok(());
             }
         }
@@ -138,4 +137,15 @@ impl<P: MerkleParameters> Ledger for MerkleLedger<P> {
         let calculated_digest = self.commitments.digest();
         self.digest() == calculated_digest
     }
+
+    fn requires_async_task(&self, new_commitments_len: usize, new_serial_numbers_len: usize) -> bool {
+        jumps_power_of_two(self.commitments.len(), new_commitments_len)
+            || jumps_power_of_two(self.serial_numbers.len(), new_serial_numbers_len)
+    }
+}
+
+fn jumps_power_of_two(start: usize, adding: usize) -> bool {
+    let prior_depth = (start as f64).log2() as usize;
+    let new_depth = ((start + adding) as f64).log2() as usize;
+    prior_depth != new_depth
 }
